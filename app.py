@@ -1236,7 +1236,7 @@ def render_tab5_device_test(params):
     sys_wavelength_str = params['wavelength'] 
     sys_lam = 1550 if "1550" in sys_wavelength_str else 1310
 
-    with st.expander("实验 1: 光衰减/光纤损耗 与 OPM 测试 (含多点扫参)", expanded=True):
+    with st.expander("光衰减/光纤损耗 与 OPM 测试 (含多点扫参)", expanded=True):
         c1, c2 = st.columns([1, 2])
         with c1:
             test_mode = st.radio("测试模式", ["单点 VOA + 光纤测试", "多点光纤长度扫参 (OptiSystem 模式)"])
@@ -1394,7 +1394,7 @@ def render_tab5_device_test(params):
                     else:
                         st.caption("说明：真实实验中通常记录不同光纤长度下的 OPM 功率读数，并用功率-长度斜率估计衰减系数；本模型加入了固定插损、连接器损耗、底噪、饱和和测量抖动。")
 
-    with st.expander("实验 2: 光隔离器 (ISO) - 波长敏感性测试"):
+    with st.expander("光隔离器 (ISO) - 波长敏感性测试"):
         c1, c2, c3 = st.columns(3)
         with c1:
             iso_spec = st.selectbox("器件规格", ["1550 nm (C-Band)", "1310 nm (O-Band)"])
@@ -1427,7 +1427,7 @@ def render_tab5_device_test(params):
             st.metric("输出功率", f"{out_p_iso:.2f} dBm")
             st.caption(f"📉 当前经历: {loss_type} = {loss:.2f} dB")
 
-    with st.expander("实验 3: 熔融拉锥分路器 (Coupler) - 附加损耗"):
+    with st.expander("熔融拉锥分路器 (Coupler) - 附加损耗"):
         col_s1, col_s2 = st.columns([1, 2])
         with col_s1:
             split_ratio = st.slider("分光比 (Port 1 %)", 0, 100, 50, 1)
@@ -1457,7 +1457,7 @@ def render_tab5_device_test(params):
             ax_split.set_xlim(splitter_in - 20, splitter_in + 5)
             st.pyplot(fig_split)
 
-    with st.expander("实验 4: 光波分复用器 (WDM) - 谱分析"):
+    with st.expander("光波分复用器 (WDM) - 谱分析"):
         w1, w2 = st.columns(2)
         with w1:
             p_1310 = st.slider("1310nm 信道功率 (dBm)", -30.0, 10.0, -5.0)
@@ -1491,7 +1491,7 @@ def render_tab5_device_test(params):
 
 @st.fragment
 def render_tab_ld():
-    st.header("💡 实验二/三：半导体 LD 光源 P-I 与直接调制特性")
+    st.header("💡 半导体 LD 光源 P-I 与直接调制特性")
     st.markdown("探究注入电流、温度、阈值电流、斜率效率和直接调制响应的关系。该模块采用工程近似模型，用于贴近真实 LD 台架实验趋势。")
     col_ld1, col_ld2 = st.columns([1, 2])
     with col_ld1:
@@ -1609,7 +1609,7 @@ def render_tab_ld():
 
 @st.fragment
 def render_tab_fiber_param():
-    st.header("🔀 实验八/九：光纤截止波长与模式分析")
+    st.header("🔀 光纤截止波长与模式分析")
     col_f1, col_f2 = st.columns(2)
     with col_f1:
         core_radius = st.number_input("纤芯半径 a (μm)", min_value=1.0, max_value=50.0, value=4.15, step=0.1)
@@ -1637,7 +1637,7 @@ def render_tab_fiber_param():
 
 @st.fragment
 def render_tab_edfa():
-    st.header("🔋 实验十：EDFA 掺铒光纤放大器工程仿真")
+    st.header("🔋 EDFA 掺铒光纤放大器工程仿真")
     st.markdown("该模块由原经验增益曲线升级为小信号增益、增益饱和、噪声指数和 ASE 噪声共同作用的工程近似模型。")
     c1, c2 = st.columns([1, 2])
     with c1:
@@ -1970,7 +1970,7 @@ def render_tab_phone(metrics, params):
 
 @st.fragment
 def render_tab_design(client, active_model_id):
-    st.header("🏆 实验十二：前沿光通信系统综合设计挑战")
+    st.header("🏆 前沿光通信系统综合设计挑战")
     scenario = st.selectbox("📍 选择业务场景 (Industry Scenarios)", ["场景 A：【东数西算】1000km 超长距骨干网设计", "场景 B：【智算中心】400G DCI 数据中心互联", "场景 C：【5G 前传】高分光比 WDM-PON 接入网"])
     st.markdown("---")
     with st.form("design_form_pro"):
