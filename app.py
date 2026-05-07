@@ -202,20 +202,65 @@ def calculate_simulation(params):
     wavelength = params['wavelength']
     modulation = params['modulation']
 
+    # 【新增】OptiSystem 对齐的发射端非理想参数。默认关闭，关闭时完全保持原模型。
+    tx_impair_enabled = bool(params.get('tx_impair_enabled', False))
+    tx_ext_ratio_db = float(params.get('tx_ext_ratio_db', 12.0))
+    mzm_bias_v = float(params.get('mzm_bias_v', 2.0))
+    mzm_vpi = max(float(params.get('mzm_vpi', 4.0)), 0.1)
+    mzm_vpp = float(params.get('mzm_vpp', 4.0))
+    laser_linewidth_mhz = float(params.get('laser_linewidth_mhz', 1.0))
+    tx_rin_db_hz = float(params.get('tx_rin_db_hz', -150.0))
+    tx_chirp_alpha = float(params.get('tx_chirp_alpha', 0.0))
+
+    # 【新增】OptiSystem 对齐的光纤/EDFA/WDM/判决分析高级参数。默认关闭，关闭时保持原模型。
+    fiber_advanced_enabled = bool(params.get('fiber_advanced_enabled', False))
+    fiber_pmd_ps_sqrtkm = float(params.get('fiber_pmd_ps_sqrtkm', 0.05))
+    fiber_gamma_wkm = float(params.get('fiber_gamma_wkm', 1.3))
+    fiber_aeff_um2 = float(params.get('fiber_aeff_um2', 80.0))
+    fiber_disp_slope = float(params.get('fiber_disp_slope', 0.08))
+    link_connector_count = int(params.get('link_connector_count', 0))
+    link_connector_loss_db = float(params.get('link_connector_loss_db', 0.25))
+    splice_count = int(params.get('splice_count', 0))
+    splice_loss_db = float(params.get('splice_loss_db', 0.05))
+    span_length_setting_km = float(params.get('span_length_setting_km', 80.0))
+    link_margin_db = float(params.get('link_margin_db', 3.0))
+
+    edfa_advanced_enabled = bool(params.get('edfa_advanced_enabled', False))
+    edfa_nf_db = float(params.get('edfa_nf_db', 5.5))
+    edfa_psat_dbm = float(params.get('edfa_psat_dbm', 20.0))
+    edfa_ase_bw_ghz = float(params.get('edfa_ase_bw_ghz', 12.5))
+    edfa_gain_flatness_db = float(params.get('edfa_gain_flatness_db', 0.5))
+
+    decision_eye_enabled = bool(params.get('decision_eye_enabled', False))
+    rx_filter_bw_ghz = float(params.get('rx_filter_bw_ghz', 18.0))
+    rx_filter_type = params.get('rx_filter_type', 'Bessel')
+    decision_threshold = float(params.get('decision_threshold', 0.5))
+    sampling_offset_ui = float(params.get('sampling_offset_ui', 0.0))
+    clock_jitter_ps = float(params.get('clock_jitter_ps', 1.0))
+
+    wdm_enabled = bool(params.get('wdm_enabled', False))
+    wdm_channels = int(params.get('wdm_channels', 1))
+    wdm_spacing_ghz = float(params.get('wdm_spacing_ghz', 100.0))
+    mux_loss_db = float(params.get('mux_loss_db', 1.5))
+    demux_loss_db = float(params.get('demux_loss_db', 1.5))
+    wdm_xtalk_db = float(params.get('wdm_xtalk_db', -30.0))
+
     lam_m = 1550e-9 if "1550" in wavelength else 1310e-9
     nu = c / lam_m
     p_tx_w = 10 ** ((tx_power_dbm - 30) / 10.0)
 
-    span_length_ref = 80.0
+    span_length_ref = span_length_setting_km if fiber_advanced_enabled else 80.0
+    span_length_ref = max(10.0, span_length_ref)
     num_spans = max(1, int(np.ceil(distance_km / span_length_ref)))
     span_len_km = distance_km / num_spans
     span_loss_db = span_len_km * att_db
     total_loss_db = distance_km * att_db
 
     # EDFA 工程近似：增益不能无限增大，受饱和输出功率限制。
-    nf_db = 5.5
+    nf_db = edfa_nf_db if edfa_advanced_enabled else 5.5
     nf_lin = 10 ** (nf_db / 10.0)
-    psat_dbm = 20.0
+    psat_dbm = edfa_psat_dbm if edfa_advanced_enabled else 20.0
+    noise_bw = max(edfa_ase_bw_ghz, 0.1) * 1e9 if edfa_advanced_enabled else noise_bw
     span_gain_db = min(edfa_gain_set_db, max(0.0, span_loss_db + 3.0))
     p_signal_after_span_dbm = tx_power_dbm
     p_ase_total_w = 0.0
@@ -235,6 +280,19 @@ def calculate_simulation(params):
         p_ase_total_w += 2.0 * h * nu * nf_lin * max(gain_lin - 1.0, 0.0) * noise_bw
 
     rx_power_dbm = p_signal_after_span_dbm
+
+    # 光纤链路/WDM 额外无源损耗：连接器、熔接、MUX/DEMUX 与工程链路余量。
+    link_connector_total_loss_db = 0.0
+    splice_total_loss_db = 0.0
+    passive_wdm_loss_db = 0.0
+    link_margin_penalty_db = 0.0
+    if fiber_advanced_enabled:
+        link_connector_total_loss_db = max(link_connector_count, 0) * max(link_connector_loss_db, 0.0)
+        splice_total_loss_db = max(splice_count, 0) * max(splice_loss_db, 0.0)
+        link_margin_penalty_db = max(link_margin_db, 0.0)
+    if wdm_enabled:
+        passive_wdm_loss_db = max(mux_loss_db, 0.0) + max(demux_loss_db, 0.0)
+    rx_power_dbm -= (link_connector_total_loss_db + splice_total_loss_db + passive_wdm_loss_db + link_margin_penalty_db)
     p_rx_w = 10 ** ((rx_power_dbm - 30) / 10.0)
 
     # 接收机热噪声/暗电流等效噪声底：用于让接收灵敏度影响 BER 趋势。
@@ -242,20 +300,79 @@ def calculate_simulation(params):
                           'QPSK': -24.0, '8-PSK': -20.0, '16-QAM': -17.0}.get(modulation, -22.0)
     p_sens_w = 10 ** ((rx_sensitivity_dbm - 30) / 10.0)
     p_rx_elec_noise_w = p_sens_w / 25.0
+    # 保存原始接收机模型，用于后面生成“加入接收机噪声前/后”的对比结果。
+    base_rx_sensitivity_dbm = rx_sensitivity_dbm
+    base_p_rx_elec_noise_w = p_rx_elec_noise_w
+
+    # 【新增】接收机偏置电压与噪声模块：默认关闭，关闭时保持原有模型输出不变。
+    receiver_noise_enabled = bool(params.get('receiver_noise_enabled', False))
+    rx_bias_voltage = float(params.get('rx_bias_voltage', 5.0))
+    rx_bandwidth_ghz = float(params.get('rx_bandwidth_ghz', 12.5))
+    rx_responsivity = float(params.get('rx_responsivity', 0.85))
+    rx_load_ohm = float(params.get('rx_load_ohm', 50.0))
+    rx_dark_current_na = float(params.get('rx_dark_current_na', 2.0))
+    rx_noise_scale = float(params.get('rx_noise_scale', 1.0))
+    rx_bias_penalty_db = 0.0
+    rx_noise_penalty_db = 0.0
+    p_thermal_noise_eq_w = 0.0
+    p_shot_noise_eq_w = 0.0
+    dark_current_effective_na = rx_dark_current_na
+    effective_responsivity = rx_responsivity
+
+    if receiver_noise_enabled:
+        q_e = 1.602176634e-19
+        k_b = 1.380649e-23
+        temp_k = 300.0
+        b_rx = max(rx_bandwidth_ghz, 0.1) * 1e9
+        r_load = max(rx_load_ohm, 1.0)
+        # 偏置不足时耗尽层不充分，等效响应度下降；偏置过高时暗电流上升。
+        bias_collection_factor = 0.55 + 0.45 * (1.0 - np.exp(-max(rx_bias_voltage, 0.0) / 3.0))
+        effective_responsivity = max(rx_responsivity * bias_collection_factor, 1e-6)
+        if rx_bias_voltage < 2.0:
+            rx_bias_penalty_db = min(8.0, (2.0 - rx_bias_voltage) * 2.0)
+        elif rx_bias_voltage > 12.0:
+            rx_bias_penalty_db = min(6.0, (rx_bias_voltage - 12.0) * 0.8)
+        dark_current_effective_na = rx_dark_current_na * (1.0 + max(rx_bias_voltage - 8.0, 0.0) ** 2 / 16.0)
+        i_photo = effective_responsivity * p_rx_w
+        i_dark = dark_current_effective_na * 1e-9
+        i_thermal_var = 4.0 * k_b * temp_k * b_rx / r_load
+        i_shot_var = 2.0 * q_e * max(i_photo + i_dark, 0.0) * b_rx
+        p_thermal_noise_eq_w = (math.sqrt(max(i_thermal_var, 0.0)) / effective_responsivity) ** 2
+        p_shot_noise_eq_w = (math.sqrt(max(i_shot_var, 0.0)) / effective_responsivity) ** 2
+        physical_rx_noise_w = (p_thermal_noise_eq_w + p_shot_noise_eq_w) * max(rx_noise_scale, 0.0)
+        p_rx_elec_noise_w = max(p_rx_elec_noise_w, physical_rx_noise_w)
+
+        # 教学可视化代价：真实接收机热噪声/散粒噪声的绝对功率有时远低于当前链路噪声，
+        # 会导致滑块变化不明显。这里把偏置不足、带宽变宽、暗电流升高、响应度下降
+        # 折算为等效 SNR 代价，使学生能直接在 Q 因子和 BER 中看到接收机非理想影响。
+        responsivity_penalty_db = max(0.0, (0.85 - effective_responsivity) / 0.85 * 6.0)
+        bandwidth_penalty_db = max(0.0, (rx_bandwidth_ghz - 12.5) / 37.5 * 8.0)
+        dark_penalty_db = min(8.0, np.log10(1.0 + dark_current_effective_na / 5.0) * 4.0)
+        load_penalty_db = max(0.0, np.log10(50.0 / max(r_load, 1.0)) * 2.0)
+        scale_penalty_db = max(0.0, rx_noise_scale - 1.0) * 2.5
+        rx_noise_penalty_db = min(22.0, (responsivity_penalty_db + bandwidth_penalty_db + dark_penalty_db + load_penalty_db + scale_penalty_db) * max(rx_noise_scale, 0.0))
+        rx_sensitivity_dbm += rx_bias_penalty_db + rx_noise_penalty_db
 
     # 简化 GN 非线性噪声：用于呈现高入纤功率时代价迅速上升的趋势。
-    gamma = 1.3e-3
+    gamma = (fiber_gamma_wkm * 1e-3) if fiber_advanced_enabled else 1.3e-3
     alpha_np_per_m = att_db / (10 * np.log10(np.e)) / 1e3
     span_len_m = span_len_km * 1e3
     leff = (1 - np.exp(-alpha_np_per_m * span_len_m)) / max(alpha_np_per_m, 1e-12)
     D = max(abs(disp_psnmkm), 0.1)
     beta2 = abs(D * 1e-6 * (lam_m ** 2) / (2 * np.pi * c))
-    eta_nli = 1.5e-3 * (gamma * leff) ** 2 / max(beta2 / 1e-26, 0.3)
+    aeff_factor = (80.0 / max(fiber_aeff_um2, 20.0)) ** 2 if fiber_advanced_enabled else 1.0
+    wdm_nli_factor = (1.0 + 0.08 * max(wdm_channels - 1, 0)) if wdm_enabled else 1.0
+    eta_nli = 1.5e-3 * (gamma * leff) ** 2 / max(beta2 / 1e-26, 0.3) * aeff_factor * wdm_nli_factor
     p_nli_w = max(1e-24, eta_nli * (p_tx_w ** 3) * num_spans)
 
     total_noise_w = p_ase_total_w + p_nli_w + p_rx_elec_noise_w + 1e-24
     snr_linear = max(p_rx_w / total_noise_w, 1e-12)
     snr_db_raw = 10 * np.log10(snr_linear)
+
+    # 原始接收机模型的 SNR，用于对比显示。
+    base_total_noise_w = p_ase_total_w + p_nli_w + base_p_rx_elec_noise_w + 1e-24
+    base_snr_linear = max(p_rx_w / base_total_noise_w, 1e-12)
+    base_snr_db_raw = 10 * np.log10(base_snr_linear)
 
     # 色散功率代价：按调制格式差异给出更真实的趋势。
     total_disp = distance_km * disp_psnmkm
@@ -265,42 +382,131 @@ def calculate_simulation(params):
     if abs(total_disp) > disp_tolerance:
         dispersion_penalty_db = min(12.0, 3.0 * ((abs(total_disp) / disp_tolerance) - 1.0) ** 2)
 
+    fiber_pmd_penalty_db = 0.0
+    fiber_slope_penalty_db = 0.0
+    fiber_nli_penalty_db = 0.0
+    pmd_dgd_ps = 0.0
+    if fiber_advanced_enabled:
+        pmd_dgd_ps = max(fiber_pmd_ps_sqrtkm, 0.0) * math.sqrt(max(distance_km, 0.0))
+        symbol_period_ps = 1000.0 / 25.0  # 25 Gbaud 教学近似，单位 ps
+        pmd_ratio = pmd_dgd_ps / max(symbol_period_ps, 1e-9)
+        mod_pmd_weight = {'OOK': 1.0, 'PAM4': 1.45, 'QPSK': 1.2, '8-PSK': 1.45, '16-QAM': 1.7}.get(modulation, 1.0)
+        fiber_pmd_penalty_db = min(8.0, (pmd_ratio / 0.12) ** 2 * 1.2 * mod_pmd_weight)
+        fiber_slope_penalty_db = min(4.0, abs(fiber_disp_slope) * distance_km / 240.0 * (1.0 if wdm_enabled else 0.35))
+        gamma_ref = 1.3
+        fiber_nli_penalty_db = min(8.0, max(0.0, (fiber_gamma_wkm / gamma_ref - 1.0)) * max(tx_power_dbm + 3.0, 0.0) / 8.0 * 3.0 * (80.0 / max(fiber_aeff_um2, 20.0)))
+
+    edfa_flatness_penalty_db = min(5.0, max(edfa_gain_flatness_db, 0.0) * 0.8) if edfa_advanced_enabled else 0.0
+
+    wdm_xtalk_penalty_db = 0.0
+    wdm_spacing_penalty_db = 0.0
+    if wdm_enabled:
+        xtalk_lin = 10 ** (wdm_xtalk_db / 10.0)
+        wdm_xtalk_penalty_db = min(9.0, 10 * np.log10(1.0 + max(wdm_channels - 1, 0) * xtalk_lin * 80.0))
+        wdm_spacing_penalty_db = min(6.0, max(0.0, (100.0 - wdm_spacing_ghz) / 50.0) * max(wdm_channels - 1, 0) * 0.45)
+
+    # 【新增】发射端非理想代价：消光比、MZM 偏置/驱动、激光器 RIN、线宽、啁啾。
+    tx_er_penalty_db = 0.0
+    tx_mzm_bias_penalty_db = 0.0
+    tx_mzm_drive_penalty_db = 0.0
+    tx_linewidth_penalty_db = 0.0
+    tx_rin_penalty_db = 0.0
+    tx_chirp_penalty_db = 0.0
+    tx_total_penalty_db = 0.0
+    tx_modulation_depth = 1.0
+    tx_bias_offset_ratio = 0.0
+    tx_mod_weight = {'OOK': 1.0, 'FSK': 0.9, 'DPSK': 1.1, 'PAM4': 1.45,
+                     'QPSK': 1.25, '8-PSK': 1.55, '16-QAM': 1.75}.get(modulation, 1.0)
+    if tx_impair_enabled:
+        # 消光比越低，“0”码泄漏越大，眼图垂直开口减小。
+        tx_er_penalty_db = min(10.0, max(0.0, (10.0 - tx_ext_ratio_db) * 0.75 * tx_mod_weight))
+
+        # MZM 最佳偏置近似为 Vpi/2，即 quadrature 点；偏离越大，调制线性和眼图越差。
+        optimum_bias_v = 0.5 * mzm_vpi
+        tx_bias_offset_ratio = abs(mzm_bias_v - optimum_bias_v) / mzm_vpi
+        tx_mzm_bias_penalty_db = min(10.0, (tx_bias_offset_ratio / 0.25) ** 2 * 2.0 * tx_mod_weight)
+
+        # Vpp 太小：调制深度不足；Vpp 过大：过驱动带来非线性失真。
+        tx_modulation_depth = float(np.clip(abs(np.sin(np.pi * mzm_vpp / (2.0 * mzm_vpi))), 0.02, 1.0))
+        underdrive_penalty = max(0.0, (0.75 - tx_modulation_depth) / 0.75) * 7.0
+        overdrive_penalty = max(0.0, (mzm_vpp / mzm_vpi - 1.35)) * 4.0
+        tx_mzm_drive_penalty_db = min(9.0, (underdrive_penalty + overdrive_penalty) * tx_mod_weight)
+
+        # 线宽主要影响相干调制星座图；OOK/PAM4 中影响较弱。
+        linewidth_weight = {'OOK': 0.15, 'FSK': 0.3, 'PAM4': 0.25, 'DPSK': 0.9,
+                            'QPSK': 1.0, '8-PSK': 1.3, '16-QAM': 1.6}.get(modulation, 0.8)
+        tx_linewidth_penalty_db = min(8.0, np.log10(1.0 + max(laser_linewidth_mhz, 0.0)) * 2.2 * linewidth_weight)
+
+        # RIN 越接近 -130 dB/Hz 越差；低于 -155 dB/Hz 基本可认为影响很小。
+        rin_weight = {'OOK': 1.2, 'PAM4': 1.5, 'FSK': 0.9, 'DPSK': 0.8,
+                      'QPSK': 0.7, '8-PSK': 0.8, '16-QAM': 1.0}.get(modulation, 1.0)
+        tx_rin_penalty_db = min(8.0, max(0.0, (tx_rin_db_hz + 155.0) / 10.0) * rin_weight)
+
+        # 直接调制 LD 的啁啾与色散耦合，长距离/大色散时惩罚更明显。
+        chirp_weight = {'OOK': 1.0, 'PAM4': 1.4, 'FSK': 0.8, 'DPSK': 1.0,
+                        'QPSK': 0.9, '8-PSK': 1.1, '16-QAM': 1.3}.get(modulation, 1.0)
+        tx_chirp_penalty_db = min(10.0, abs(tx_chirp_alpha) * abs(total_disp) / 1100.0 * chirp_weight)
+
+        tx_total_penalty_db = min(28.0, tx_er_penalty_db + tx_mzm_bias_penalty_db +
+                                  tx_mzm_drive_penalty_db + tx_linewidth_penalty_db +
+                                  tx_rin_penalty_db + tx_chirp_penalty_db)
+
     # 其它工程惩罚项：连接器/滤波器/DSP非理想项，避免理想公式过于乐观。
     implementation_penalty_db = {'OOK': 2.0, 'FSK': 3.0, 'DPSK': 2.5, 'PAM4': 4.5,
                                  'QPSK': 3.0, '8-PSK': 4.0, '16-QAM': 5.0}.get(modulation, 3.0)
-    effective_snr_db = snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db
+    link_advanced_penalty_db = (fiber_pmd_penalty_db + fiber_slope_penalty_db + fiber_nli_penalty_db +
+                                edfa_flatness_penalty_db + wdm_xtalk_penalty_db + wdm_spacing_penalty_db)
+    decision_filter_penalty_db = 0.0
+    decision_threshold_penalty_db = 0.0
+    sampling_jitter_penalty_db = 0.0
+    if decision_eye_enabled:
+        # 低通滤波器带宽太窄会造成 ISI，太宽会引入更多噪声；判决门限和采样偏移直接压缩眼图开口。
+        filter_weight = {'Bessel': 0.9, 'Gaussian': 1.0, 'Butterworth': 1.15}.get(rx_filter_type, 1.0)
+        opt_bw = 18.0 if modulation in ['OOK', 'DPSK', 'FSK'] else 25.0
+        narrow_penalty = max(0.0, (opt_bw - rx_filter_bw_ghz) / opt_bw) * 7.0
+        wide_penalty = max(0.0, (rx_filter_bw_ghz - opt_bw * 1.6) / (opt_bw * 1.6)) * 4.0
+        decision_filter_penalty_db = min(9.0, (narrow_penalty + wide_penalty) * filter_weight)
+        decision_threshold_penalty_db = min(8.0, abs(decision_threshold - 0.5) / 0.25 * 4.0)
+        sampling_jitter_penalty_db = min(10.0, (abs(sampling_offset_ui) / 0.25) ** 2 * 5.0 + max(clock_jitter_ps - 2.0, 0.0) / 10.0 * 3.0)
+
+    analysis_penalty_db = decision_filter_penalty_db + decision_threshold_penalty_db + sampling_jitter_penalty_db
+    base_effective_snr_db = base_snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db
+    base_effective_snr_linear = max(10 ** (base_effective_snr_db / 10.0), 1e-12)
+    effective_snr_db = snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db - analysis_penalty_db - tx_total_penalty_db - rx_bias_penalty_db - rx_noise_penalty_db
     effective_snr_linear = max(10 ** (effective_snr_db / 10.0), 1e-12)
 
     def qfunc(x):
         return 0.5 * math.erfc(float(x) / math.sqrt(2))
 
-    # 按调制格式分别估算 BER，避免简单乘 mod_factor。
-    if modulation == 'OOK':
-        q_factor = math.sqrt(effective_snr_linear)
-        ber = qfunc(q_factor)
-    elif modulation == 'DPSK':
-        q_factor = math.sqrt(2 * effective_snr_linear)
-        ber = 0.5 * math.exp(-effective_snr_linear)
-    elif modulation == 'FSK':
-        q_factor = math.sqrt(effective_snr_linear)
-        ber = 0.5 * math.exp(-0.5 * effective_snr_linear)
-    elif modulation == 'PAM4':
-        q_factor = math.sqrt(effective_snr_linear) / 3.0
-        ber = 0.75 * qfunc(math.sqrt(0.8 * effective_snr_linear))
-    elif modulation == 'QPSK':
-        q_factor = math.sqrt(2 * effective_snr_linear)
-        ber = qfunc(math.sqrt(2 * effective_snr_linear))
-    elif modulation == '8-PSK':
-        q_factor = math.sqrt(2 * effective_snr_linear) * math.sin(math.pi / 8)
-        ber = (2 / 3) * qfunc(math.sqrt(2 * effective_snr_linear) * math.sin(math.pi / 8))
-    elif modulation == '16-QAM':
-        q_factor = math.sqrt(effective_snr_linear / 5.0)
-        ber = (3 / 8) * math.erfc(math.sqrt(effective_snr_linear / 10.0))
-    else:
-        q_factor = math.sqrt(effective_snr_linear)
-        ber = qfunc(q_factor)
+    def ber_q_from_snr(snr_lin, modulation_name):
+        if modulation_name == 'OOK':
+            q_val = math.sqrt(snr_lin)
+            ber_val = qfunc(q_val)
+        elif modulation_name == 'DPSK':
+            q_val = math.sqrt(2 * snr_lin)
+            ber_val = 0.5 * math.exp(-snr_lin)
+        elif modulation_name == 'FSK':
+            q_val = math.sqrt(snr_lin)
+            ber_val = 0.5 * math.exp(-0.5 * snr_lin)
+        elif modulation_name == 'PAM4':
+            q_val = math.sqrt(snr_lin) / 3.0
+            ber_val = 0.75 * qfunc(math.sqrt(0.8 * snr_lin))
+        elif modulation_name == 'QPSK':
+            q_val = math.sqrt(2 * snr_lin)
+            ber_val = qfunc(math.sqrt(2 * snr_lin))
+        elif modulation_name == '8-PSK':
+            q_val = math.sqrt(2 * snr_lin) * math.sin(math.pi / 8)
+            ber_val = (2 / 3) * qfunc(math.sqrt(2 * snr_lin) * math.sin(math.pi / 8))
+        elif modulation_name == '16-QAM':
+            q_val = math.sqrt(snr_lin / 5.0)
+            ber_val = (3 / 8) * math.erfc(math.sqrt(snr_lin / 10.0))
+        else:
+            q_val = math.sqrt(snr_lin)
+            ber_val = qfunc(q_val)
+        return max(0.0, q_val), min(1.0, max(1e-18, ber_val))
 
-    ber = min(1.0, max(1e-18, ber))
+    base_q_factor, base_ber = ber_q_from_snr(base_effective_snr_linear, modulation)
+    q_factor, ber = ber_q_from_snr(effective_snr_linear, modulation)
     osnr_db = 10 * np.log10(max(p_rx_w / (p_ase_total_w + p_nli_w + 1e-24), 1e-12))
     osnr_db_01nm = osnr_db + 10 * np.log10(noise_bw / ref_bw)
 
@@ -316,6 +522,71 @@ def calculate_simulation(params):
         "sensitivity_margin_db": rx_power_dbm - rx_sensitivity_dbm,
         "dispersion_penalty_db": dispersion_penalty_db,
         "gain_saturation_penalty_db": gain_saturation_penalty_db,
+        "base_q_factor": max(0.0, base_q_factor),
+        "base_ber": base_ber,
+        "base_rx_sensitivity_dbm": base_rx_sensitivity_dbm,
+        "effective_snr_db": effective_snr_db,
+        "base_effective_snr_db": base_effective_snr_db,
+        "tx_impair_enabled": tx_impair_enabled,
+        "tx_total_penalty_db": tx_total_penalty_db,
+        "tx_er_penalty_db": tx_er_penalty_db,
+        "tx_mzm_bias_penalty_db": tx_mzm_bias_penalty_db,
+        "tx_mzm_drive_penalty_db": tx_mzm_drive_penalty_db,
+        "tx_linewidth_penalty_db": tx_linewidth_penalty_db,
+        "tx_rin_penalty_db": tx_rin_penalty_db,
+        "tx_chirp_penalty_db": tx_chirp_penalty_db,
+        "tx_modulation_depth": tx_modulation_depth,
+        "tx_bias_offset_ratio": tx_bias_offset_ratio,
+        "tx_ext_ratio_db": tx_ext_ratio_db,
+        "mzm_bias_v": mzm_bias_v,
+        "mzm_vpi": mzm_vpi,
+        "mzm_vpp": mzm_vpp,
+        "laser_linewidth_mhz": laser_linewidth_mhz,
+        "tx_rin_db_hz": tx_rin_db_hz,
+        "tx_chirp_alpha": tx_chirp_alpha,
+        "rx_bias_voltage": rx_bias_voltage,
+        "rx_bias_penalty_db": rx_bias_penalty_db,
+        "rx_noise_penalty_db": rx_noise_penalty_db,
+        "rx_total_penalty_db": rx_bias_penalty_db + rx_noise_penalty_db,
+        "rx_effective_responsivity": effective_responsivity,
+        "rx_dark_current_na": dark_current_effective_na,
+        "rx_thermal_noise_dbm": 10*np.log10(p_thermal_noise_eq_w*1e3) if p_thermal_noise_eq_w > 0 else -100,
+        "rx_shot_noise_dbm": 10*np.log10(p_shot_noise_eq_w*1e3) if p_shot_noise_eq_w > 0 else -100,
+        "receiver_noise_enabled": receiver_noise_enabled,
+        "fiber_advanced_enabled": fiber_advanced_enabled,
+        "fiber_pmd_ps_sqrtkm": fiber_pmd_ps_sqrtkm,
+        "fiber_gamma_wkm": fiber_gamma_wkm,
+        "fiber_aeff_um2": fiber_aeff_um2,
+        "fiber_disp_slope": fiber_disp_slope,
+        "pmd_dgd_ps": pmd_dgd_ps,
+        "fiber_pmd_penalty_db": fiber_pmd_penalty_db,
+        "fiber_slope_penalty_db": fiber_slope_penalty_db,
+        "fiber_nli_penalty_db": fiber_nli_penalty_db,
+        "link_connector_total_loss_db": link_connector_total_loss_db,
+        "splice_total_loss_db": splice_total_loss_db,
+        "link_margin_penalty_db": link_margin_penalty_db,
+        "link_advanced_penalty_db": link_advanced_penalty_db,
+        "edfa_advanced_enabled": edfa_advanced_enabled,
+        "edfa_nf_db": nf_db,
+        "edfa_psat_dbm": psat_dbm,
+        "edfa_ase_bw_ghz": edfa_ase_bw_ghz,
+        "edfa_flatness_penalty_db": edfa_flatness_penalty_db,
+        "decision_eye_enabled": decision_eye_enabled,
+        "rx_filter_bw_ghz": rx_filter_bw_ghz,
+        "rx_filter_type": rx_filter_type,
+        "decision_threshold": decision_threshold,
+        "sampling_offset_ui": sampling_offset_ui,
+        "clock_jitter_ps": clock_jitter_ps,
+        "decision_filter_penalty_db": decision_filter_penalty_db,
+        "decision_threshold_penalty_db": decision_threshold_penalty_db,
+        "sampling_jitter_penalty_db": sampling_jitter_penalty_db,
+        "analysis_penalty_db": analysis_penalty_db,
+        "wdm_enabled": wdm_enabled,
+        "wdm_channels": wdm_channels,
+        "wdm_spacing_ghz": wdm_spacing_ghz,
+        "mux_demux_loss_db": passive_wdm_loss_db,
+        "wdm_xtalk_penalty_db": wdm_xtalk_penalty_db,
+        "wdm_spacing_penalty_db": wdm_spacing_penalty_db,
         "num_spans": num_spans,
         "span_loss_db": span_loss_db,
         "model_note": "工程近似：链路预算 + EDFA ASE + GN非线性 + 色散代价 + 调制格式BER近似"
@@ -352,6 +623,66 @@ def run_coherent_dsp_demo(modulation, q_factor, dispersion, phase_noise_std=0.05
     sig_stage_1 = sig_stage_2 * cd_effect
     
     return sig_stage_1, sig_stage_2, sig_stage_3
+
+
+def generate_eye_diagram_data(metrics, params, n_bits=160, samples_per_bit=32):
+    """生成用于教学显示的 NRZ/PAM4 眼图。它把 Q/BER、发射端、光纤、接收机、判决器代价转化为眼图开口变化。"""
+    rng = np.random.default_rng(2026)
+    modulation = params.get("modulation", "OOK")
+    if modulation == "PAM4":
+        symbols = rng.integers(0, 4, n_bits)
+        levels = np.array([-3, -1, 1, 3], dtype=float) / 3.0
+        data = levels[symbols]
+    else:
+        symbols = rng.integers(0, 2, n_bits)
+        data = 2 * symbols.astype(float) - 1
+
+    sps = samples_per_bit
+    waveform = np.repeat(data, sps)
+    t = np.arange(len(waveform)) / sps
+
+    # 带宽不足和色散/PMD 会让边沿变缓，相当于低通卷积。
+    filter_pen = metrics.get("decision_filter_penalty_db", 0.0)
+    disp_pen = metrics.get("dispersion_penalty_db", 0.0) + metrics.get("fiber_pmd_penalty_db", 0.0)
+    smooth_len = int(np.clip(2 + filter_pen * 1.4 + disp_pen * 0.9, 2, sps * 2))
+    kernel = np.hanning(max(3, smooth_len))
+    kernel = kernel / max(kernel.sum(), 1e-9)
+    waveform = np.convolve(waveform, kernel, mode="same")
+
+    # 根据有效 SNR、RIN、接收机噪声和串扰注入幅度噪声。
+    q = max(metrics.get("q_factor", 1.0), 0.15)
+    noise_std = np.clip(0.18 / q + metrics.get("tx_rin_penalty_db", 0.0) * 0.015 + metrics.get("wdm_xtalk_penalty_db", 0.0) * 0.012, 0.01, 0.42)
+    waveform = waveform + rng.normal(0, noise_std, len(waveform))
+
+    # 采样偏移和时钟抖动压缩眼宽。
+    ui_shift = metrics.get("sampling_offset_ui", 0.0)
+    jitter_ps = metrics.get("clock_jitter_ps", 0.0)
+    jitter_ui = np.clip(jitter_ps / 40.0, 0.0, 0.35)
+
+    segments = []
+    seg_t = np.linspace(-1, 1, 2 * sps, endpoint=False)
+    for i in range(2, n_bits - 2):
+        start = i * sps + int(ui_shift * sps) + int(rng.normal(0, jitter_ui * sps))
+        end = start + 2 * sps
+        if start >= 0 and end <= len(waveform):
+            segments.append(waveform[start:end])
+    if not segments:
+        segments = [waveform[:2*sps]]
+    arr = np.array(segments)
+
+    center = arr[:, sps]
+    if modulation == "PAM4":
+        eye_height = max(0.0, 2.0 / 3.0 - 2.0 * np.std(center))
+    else:
+        ones = center[center > 0]
+        zeros = center[center <= 0]
+        if len(ones) and len(zeros):
+            eye_height = max(0.0, np.mean(ones) - np.mean(zeros) - 3 * (np.std(ones) + np.std(zeros)))
+        else:
+            eye_height = max(0.0, 2.0 - 6 * np.std(center))
+    eye_width = max(0.0, 1.0 - abs(ui_shift) * 1.7 - jitter_ui * 1.8 - filter_pen / 14.0 - disp_pen / 18.0)
+    noise_margin = max(0.0, eye_height / 2.0 - abs(metrics.get("decision_threshold", 0.5) - 0.5))
+    return seg_t, arr, {"eye_height": eye_height, "eye_width": eye_width, "noise_margin": noise_margin, "jitter_ui": jitter_ui, "noise_std": noise_std}
 
 def encode_cmi(bits):
     encoded_bits = []
@@ -674,8 +1005,23 @@ st.markdown("""
     div[data-testid="stExpander"] { background-color: #111827; border-radius: 10px; border: 1px solid #334155; }
     div[data-testid="stExpander"] div[role="button"] p { font-size: 1.02rem; font-weight: 600; color: #93c5fd; }
     .stButton > button { width: 100%; border-radius: 7px; font-weight: 600; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { background-color: #111827; border-radius: 6px 6px 0 0; padding: 10px 18px; color: #cbd5e1; }
+    /* 顶部实验模块导航修复：模块较多时自动换行，避免右侧“智能导师”等标签被挤出屏幕且无法点击 */
+    .stTabs [data-baseweb="tab-list"], div[role="tablist"] {
+        gap: 8px;
+        flex-wrap: wrap !important;
+        overflow-x: visible !important;
+        overflow-y: visible !important;
+        height: auto !important;
+        row-gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"], div[role="tab"] {
+        background-color: #111827;
+        border-radius: 6px 6px 0 0;
+        padding: 10px 18px;
+        color: #cbd5e1;
+        flex: 0 0 auto !important;
+        white-space: nowrap !important;
+    }
     .stTabs [aria-selected="true"] { background-color: #1e293b !important; color: #38bdf8 !important; border-bottom: 2px solid #38bdf8; }
 </style>
 """, unsafe_allow_html=True)
@@ -781,17 +1127,97 @@ with st.sidebar:
         st.session_state.opt_power = st.session_state.tx_power_slider
 
     tx_power = st.slider("发射功率 (dBm)", -10.0, 10.0, value=float(st.session_state.opt_power), step=0.5, key="tx_power_slider", on_change=update_power)
+
+    # 【新增】发射机高级参数：类似 OptiSystem 的 CW Laser / MZM / Directly Modulated Laser 非理想项。
+    with st.expander("🚀 发射机非理想参数（OptiSystem对齐）", expanded=False):
+        tx_impair_enabled = st.checkbox("启用发射机非理想影响", value=False, key="tx_impair_enabled")
+        tx_ext_ratio_db = st.slider("消光比 ER (dB)", 3.0, 20.0, 12.0, 0.5, key="tx_ext_ratio_db",
+                                    help="ER 越低，0 码泄漏越明显，眼图垂直开口变小。")
+        mzm_vpi = st.slider("MZM 半波电压 Vπ (V)", 1.0, 8.0, 4.0, 0.1, key="mzm_vpi")
+        mzm_bias_v = st.slider("MZM 偏置电压 Vbias (V)", 0.0, 8.0, 2.0, 0.1, key="mzm_bias_v",
+                               help="最佳教学参考点约为 Vπ/2，偏离后调制线性变差。")
+        mzm_vpp = st.slider("MZM 调制电压 Vpp (V)", 0.1, 10.0, 4.0, 0.1, key="mzm_vpp",
+                            help="Vpp 太小会调制不足，过大则可能产生非线性过驱动。")
+        laser_linewidth_mhz = st.slider("激光器线宽 (MHz)", 0.01, 20.0, 1.0, 0.01, key="laser_linewidth_mhz",
+                                        help="线宽主要影响 QPSK/16-QAM 等相干调制星座图相位噪声。")
+        tx_rin_db_hz = st.slider("RIN 相对强度噪声 (dB/Hz)", -165.0, -125.0, -150.0, 1.0, key="tx_rin_db_hz",
+                                 help="数值越接近 -125 dB/Hz，强度噪声越严重。")
+        tx_chirp_alpha = st.slider("发射端啁啾系数 α", -5.0, 5.0, 0.0, 0.1, key="tx_chirp_alpha",
+                                   help="直接调制 LD 的啁啾会和光纤色散共同造成脉冲展宽。")
+        st.caption("开启后：消光比、MZM 偏置/驱动、RIN、线宽和啁啾会转化为发射端等效代价，直接影响 Q 因子、BER、星座图/眼图开口。")
     
     st.markdown("### 2. 光纤链路 (Fiber Link)")
     distance = st.slider("传输距离 (km)", 10, 200, 80, 5)
     attenuation = st.slider(f"衰减系数 (dB/km) @{wavelength[:4]}", 0.15, 0.50, default_att, 0.01)
     dispersion = st.slider("色散系数 (ps/nm/km)", 0, 20, default_disp, 1)
+
+    # 【新增】光纤高级参数：对应 OptiSystem Optical Fiber 中的 PMD、非线性、熔接/连接器等非理想项。
+    with st.expander("🧵 光纤链路高级参数（PMD/非线性/接头熔接）", expanded=False):
+        fiber_advanced_enabled = st.checkbox("启用光纤高级非理想影响", value=False, key="fiber_advanced_enabled")
+        fiber_pmd_ps_sqrtkm = st.slider("PMD 系数 (ps/√km)", 0.00, 1.00, 0.05, 0.01, key="fiber_pmd_ps_sqrtkm",
+                                        help="PMD 越大，不同偏振分量到达时间差越明显，眼宽和 Q 因子下降。")
+        fiber_gamma_wkm = st.slider("非线性系数 γ (1/W/km)", 0.1, 3.0, 1.3, 0.1, key="fiber_gamma_wkm",
+                                    help="γ 越大，高入纤功率下 SPM/XPM 等非线性代价越明显。")
+        fiber_aeff_um2 = st.slider("有效面积 Aeff (μm²)", 20.0, 120.0, 80.0, 1.0, key="fiber_aeff_um2",
+                                   help="有效面积越小，光强越高，非线性噪声更明显。")
+        fiber_disp_slope = st.slider("色散斜率 S (ps/nm²/km)", 0.00, 0.20, 0.08, 0.01, key="fiber_disp_slope")
+        link_connector_count = st.number_input("链路连接器数量", min_value=0, max_value=40, value=0, step=1, key="link_connector_count")
+        link_connector_loss_db = st.slider("单个连接器损耗 (dB)", 0.00, 1.00, 0.25, 0.01, key="link_connector_loss_db")
+        splice_count = st.number_input("熔接点数量", min_value=0, max_value=80, value=0, step=1, key="splice_count")
+        splice_loss_db = st.slider("单个熔接损耗 (dB)", 0.00, 0.30, 0.05, 0.01, key="splice_loss_db")
+        span_length_setting_km = st.slider("每跨段长度 (km)", 20.0, 120.0, 80.0, 5.0, key="span_length_setting_km")
+        link_margin_db = st.slider("工程链路余量 Margin (dB)", 0.0, 10.0, 3.0, 0.5, key="link_margin_db")
+        st.caption("开启后：PMD、非线性、接头/熔接和链路余量会改变接收功率、等效 SNR、眼图开口、Q 因子和 BER。")
+
+    # 【新增】WDM 参数：默认关闭，避免影响单通道教学实验；开启后模拟 MUX/DEMUX 插损、串扰和通道间非线性。
+    with st.expander("🌈 WDM 波分复用参数（可选）", expanded=False):
+        wdm_enabled = st.checkbox("启用 WDM 多信道影响", value=False, key="wdm_enabled")
+        wdm_channels = st.select_slider("信道数", options=[1, 2, 4, 8, 16, 32, 40], value=1, key="wdm_channels")
+        wdm_spacing_ghz = st.select_slider("信道间隔 (GHz)", options=[25.0, 50.0, 75.0, 100.0, 200.0], value=100.0, key="wdm_spacing_ghz")
+        mux_loss_db = st.slider("MUX 插入损耗 (dB)", 0.0, 6.0, 1.5, 0.1, key="mux_loss_db")
+        demux_loss_db = st.slider("DEMUX 插入损耗 (dB)", 0.0, 6.0, 1.5, 0.1, key="demux_loss_db")
+        wdm_xtalk_db = st.slider("相邻信道串扰 (dB)", -45.0, -15.0, -30.0, 1.0, key="wdm_xtalk_db",
+                                 help="串扰越接近 -15 dB，信道间干扰越严重。")
+        st.caption("开启后：信道数增加、间隔变小、串扰变差，会提高非线性和串扰代价，接近 OptiSystem WDM Analyzer 的趋势。")
     
     st.markdown("### 3. 放大器 (EDFA)")
     def update_gain():
         st.session_state.opt_gain = st.session_state.edfa_gain_slider
         
     edfa_gain = st.slider("放大增益 (dB)", 0.0, 40.0, value=float(st.session_state.opt_gain), step=0.5, key="edfa_gain_slider", on_change=update_gain)
+
+    # 【新增】EDFA 高级参数：对应 OptiSystem EDFA 中的 NF、Psat、ASE 带宽和增益平坦度。
+    with st.expander("🔋 EDFA 高级参数（NF/Psat/ASE）", expanded=False):
+        edfa_advanced_enabled = st.checkbox("启用 EDFA 高级非理想影响", value=False, key="edfa_advanced_enabled")
+        edfa_nf_db = st.slider("噪声系数 NF (dB)", 3.0, 9.0, 5.5, 0.1, key="edfa_nf_db",
+                               help="NF 越高，ASE 噪声越大，OSNR 和 BER 越差。")
+        edfa_psat_dbm = st.slider("饱和输出功率 Psat (dBm)", 5.0, 25.0, 20.0, 0.5, key="edfa_psat_dbm",
+                                  help="Psat 越低，高增益/高输入功率时越容易增益压缩。")
+        edfa_ase_bw_ghz = st.slider("ASE 等效噪声带宽 (GHz)", 1.0, 100.0, 12.5, 0.5, key="edfa_ase_bw_ghz")
+        edfa_gain_flatness_db = st.slider("增益平坦度误差 (dB)", 0.0, 5.0, 0.5, 0.1, key="edfa_gain_flatness_db")
+        st.caption("开启后：NF、Psat、ASE 带宽和增益平坦度会改变 OSNR、饱和代价、Q 因子和 BER。")
+
+    # 【新增】接收机滤波/判决/眼图分析参数：对应 OptiSystem Low Pass Filter + BER Analyzer + Eye Diagram Analyzer。
+    with st.expander("👁️ 接收端滤波、判决与眼图分析", expanded=False):
+        decision_eye_enabled = st.checkbox("启用滤波/判决/眼图影响", value=False, key="decision_eye_enabled")
+        rx_filter_bw_ghz = st.slider("低通滤波器带宽 (GHz)", 2.0, 60.0, 18.0, 0.5, key="rx_filter_bw_ghz")
+        rx_filter_type = st.selectbox("滤波器类型", ["Bessel", "Gaussian", "Butterworth"], index=0, key="rx_filter_type")
+        decision_threshold = st.slider("判决门限（归一化）", 0.10, 0.90, 0.50, 0.01, key="decision_threshold",
+                                       help="0.5 附近为二电平 OOK/PAM4 教学默认门限；偏离后误判增加。")
+        sampling_offset_ui = st.slider("采样时刻偏移 (UI)", -0.50, 0.50, 0.00, 0.01, key="sampling_offset_ui")
+        clock_jitter_ps = st.slider("时钟抖动 Jitter (ps)", 0.0, 30.0, 1.0, 0.5, key="clock_jitter_ps")
+        st.caption("开启后：带宽不匹配、门限偏移、采样偏移和抖动会直接压缩眼高/眼宽，并影响 Q 因子和 BER。")
+
+    # 【新增】接收机偏置电压与噪声模块：默认关闭，避免影响原有实验结果；开启后影响链路 BER/Q/OSNR。
+    with st.expander("🔬 接收机偏置与噪声（高级）", expanded=False):
+        receiver_noise_enabled = st.checkbox("启用接收机偏置/噪声影响", value=False, key="receiver_noise_enabled")
+        rx_bias_voltage = st.slider("PIN/APD 等效偏置电压 (V)", 0.0, 15.0, 5.0, 0.1, key="rx_bias_voltage")
+        rx_responsivity = st.slider("探测器响应度 R (A/W)", 0.2, 1.2, 0.85, 0.05, key="rx_responsivity")
+        rx_bandwidth_ghz = st.slider("接收机等效带宽 (GHz)", 1.0, 50.0, 12.5, 0.5, key="rx_bandwidth_ghz")
+        rx_dark_current_na = st.number_input("暗电流 Id (nA)", min_value=0.0, max_value=1000.0, value=2.0, step=0.5, key="rx_dark_current_na")
+        rx_load_ohm = st.select_slider("负载电阻 RL (Ω)", options=[25.0, 50.0, 75.0, 100.0, 200.0, 500.0], value=50.0, key="rx_load_ohm")
+        rx_noise_scale = st.slider("噪声强度系数", 0.0, 5.0, 1.0, 0.1, key="rx_noise_scale")
+        st.caption("开启后：低偏置会降低响应度，高偏置会增加暗电流；带宽越大，热噪声和散粒噪声越明显。")
     
     # 编码设置已集成到“🔣 线路编码”实验页，侧边栏仅保留全局光链路参数。
 
@@ -802,7 +1228,50 @@ params = {
     "attenuation": attenuation,
     "dispersion": dispersion,
     "edfa_gain": edfa_gain,
-    "wavelength": wavelength
+    "wavelength": wavelength,
+    "fiber_advanced_enabled": fiber_advanced_enabled,
+    "fiber_pmd_ps_sqrtkm": fiber_pmd_ps_sqrtkm,
+    "fiber_gamma_wkm": fiber_gamma_wkm,
+    "fiber_aeff_um2": fiber_aeff_um2,
+    "fiber_disp_slope": fiber_disp_slope,
+    "link_connector_count": link_connector_count,
+    "link_connector_loss_db": link_connector_loss_db,
+    "splice_count": splice_count,
+    "splice_loss_db": splice_loss_db,
+    "span_length_setting_km": span_length_setting_km,
+    "link_margin_db": link_margin_db,
+    "edfa_advanced_enabled": edfa_advanced_enabled,
+    "edfa_nf_db": edfa_nf_db,
+    "edfa_psat_dbm": edfa_psat_dbm,
+    "edfa_ase_bw_ghz": edfa_ase_bw_ghz,
+    "edfa_gain_flatness_db": edfa_gain_flatness_db,
+    "decision_eye_enabled": decision_eye_enabled,
+    "rx_filter_bw_ghz": rx_filter_bw_ghz,
+    "rx_filter_type": rx_filter_type,
+    "decision_threshold": decision_threshold,
+    "sampling_offset_ui": sampling_offset_ui,
+    "clock_jitter_ps": clock_jitter_ps,
+    "wdm_enabled": wdm_enabled,
+    "wdm_channels": wdm_channels,
+    "wdm_spacing_ghz": wdm_spacing_ghz,
+    "mux_loss_db": mux_loss_db,
+    "demux_loss_db": demux_loss_db,
+    "wdm_xtalk_db": wdm_xtalk_db,
+    "tx_impair_enabled": tx_impair_enabled,
+    "tx_ext_ratio_db": tx_ext_ratio_db,
+    "mzm_bias_v": mzm_bias_v,
+    "mzm_vpi": mzm_vpi,
+    "mzm_vpp": mzm_vpp,
+    "laser_linewidth_mhz": laser_linewidth_mhz,
+    "tx_rin_db_hz": tx_rin_db_hz,
+    "tx_chirp_alpha": tx_chirp_alpha,
+    "receiver_noise_enabled": receiver_noise_enabled,
+    "rx_bias_voltage": rx_bias_voltage,
+    "rx_responsivity": rx_responsivity,
+    "rx_bandwidth_ghz": rx_bandwidth_ghz,
+    "rx_dark_current_na": rx_dark_current_na,
+    "rx_load_ohm": rx_load_ohm,
+    "rx_noise_scale": rx_noise_scale
 }
 
 # 全局计算，由于加入了 cache_data，只有侧边栏参数变化才会重新执行
@@ -846,8 +1315,8 @@ if st.sidebar.button("📝 生成实验报告"):
 st.markdown("# 🔬 智光实验室：光通信AI仿真平台")
 st.caption(f"当前工作波长: **{wavelength}** | 模式: 综合实验 | AI 引擎: **{ai_engine_status}**")
 
-tab1, tab5, tab_ld, tab_fiber_param, tab_edfa, tab_otdr, tab2, tab4, tab_phone, tab_design, tab3 = st.tabs([
-    "📈 链路仿真", "🛠️ 器件测试", "💡 LD光源", "🔀 光纤参数", "🔋 EDFA仿真", 
+tab1, tab5, tab_ld, tab_fiber_param, tab_fiber_principle, tab_edfa, tab_otdr, tab2, tab4, tab_phone, tab_design, tab3 = st.tabs([
+    "📈 链路仿真", "🛠️ 器件测试", "💡 LD光源", "🔀 光纤参数", "🧭 传输原理", "🔋 EDFA仿真", 
     "📉 OTDR实验", "🤖 AI 诊断", "🔣 线路编码", "📞 电话系统", "🏆 综合设计", "🎓 智能导师"
 ])
 
@@ -874,6 +1343,207 @@ def render_tab1_link_sim(params, metrics, client, active_model_id):
         col6.metric("灵敏度余量", f"{metrics.get('sensitivity_margin_db', 0):.2f} dB")
         col7.metric("色散代价", f"{metrics.get('dispersion_penalty_db', 0):.2f} dB")
         col8.metric("EDFA 跨段数", f"{metrics.get('num_spans', 1)}")
+
+        # 【新增】OptiSystem 对齐高级模块的直观结果展示。
+        advanced_enabled_any = any([
+            metrics.get("fiber_advanced_enabled", False), metrics.get("edfa_advanced_enabled", False),
+            metrics.get("decision_eye_enabled", False), metrics.get("wdm_enabled", False)
+        ])
+        if advanced_enabled_any:
+            st.markdown("#### 🧩 OptiSystem 对齐高级模块影响总览")
+            adv_cols = st.columns(4)
+            adv_cols[0].metric("链路高级代价", f"{metrics.get('link_advanced_penalty_db', 0):.2f} dB")
+            adv_cols[1].metric("判决/眼图代价", f"{metrics.get('analysis_penalty_db', 0):.2f} dB")
+            adv_cols[2].metric("MUX/DEMUX 损耗", f"{metrics.get('mux_demux_loss_db', 0):.2f} dB")
+            adv_cols[3].metric("ASE 功率", f"{metrics.get('ase_power_dbm', -100):.1f} dBm")
+
+            adv_rows = []
+            if metrics.get("fiber_advanced_enabled", False):
+                adv_rows.extend([
+                    ["PMD 偏振模色散", f"DGD≈{metrics.get('pmd_dgd_ps', 0):.2f} ps", f"{metrics.get('fiber_pmd_penalty_db', 0):.2f} dB", "眼宽减小，采样容限下降"],
+                    ["非线性 SPM/XPM", f"γ={metrics.get('fiber_gamma_wkm', 0):.2f}, Aeff={metrics.get('fiber_aeff_um2', 0):.0f} μm²", f"{metrics.get('fiber_nli_penalty_db', 0):.2f} dB", "高发射功率时 BER 更容易变差"],
+                    ["接头/熔接/余量", f"连接器={metrics.get('link_connector_total_loss_db', 0):.2f} dB，熔接={metrics.get('splice_total_loss_db', 0):.2f} dB，余量={metrics.get('link_margin_penalty_db', 0):.2f} dB", "影响接收功率", "接收功率下降，灵敏度余量变小"],
+                ])
+            if metrics.get("edfa_advanced_enabled", False):
+                adv_rows.extend([
+                    ["EDFA 噪声系数 NF", f"NF={metrics.get('edfa_nf_db', 0):.1f} dB", "影响 OSNR", "NF 增大 → ASE 增大 → OSNR/Q 下降"],
+                    ["EDFA 饱和/平坦度", f"Psat={metrics.get('edfa_psat_dbm', 0):.1f} dBm，平坦度代价={metrics.get('edfa_flatness_penalty_db', 0):.2f} dB", f"饱和代价={metrics.get('gain_saturation_penalty_db', 0):.2f} dB", "增益过高不一定更好"],
+                ])
+            if metrics.get("wdm_enabled", False):
+                adv_rows.extend([
+                    ["WDM 插损与串扰", f"{metrics.get('wdm_channels', 1)} 通道，间隔={metrics.get('wdm_spacing_ghz', 0):.0f} GHz", f"串扰={metrics.get('wdm_xtalk_penalty_db', 0):.2f} dB，间隔={metrics.get('wdm_spacing_penalty_db', 0):.2f} dB", "信道越多、间隔越小，串扰和非线性越明显"],
+                ])
+            if metrics.get("decision_eye_enabled", False):
+                adv_rows.extend([
+                    ["接收滤波器", f"{metrics.get('rx_filter_type', '')}, BW={metrics.get('rx_filter_bw_ghz', 0):.1f} GHz", f"{metrics.get('decision_filter_penalty_db', 0):.2f} dB", "带宽太窄产生 ISI，太宽引入更多噪声"],
+                    ["判决与采样", f"门限={metrics.get('decision_threshold', 0):.2f}, 偏移={metrics.get('sampling_offset_ui', 0):+.2f} UI, 抖动={metrics.get('clock_jitter_ps', 0):.1f} ps", f"{metrics.get('decision_threshold_penalty_db', 0)+metrics.get('sampling_jitter_penalty_db', 0):.2f} dB", "最佳采样点偏移会导致眼图闭合"],
+                ])
+            if adv_rows:
+                st.dataframe(pd.DataFrame(adv_rows, columns=["模块", "当前参数", "等效影响", "学生观察重点"]), use_container_width=True, hide_index=True)
+
+                labels = []
+                values = []
+                for label, key in [("PMD", "fiber_pmd_penalty_db"), ("非线性", "fiber_nli_penalty_db"), ("色散斜率", "fiber_slope_penalty_db"), ("EDFA平坦度", "edfa_flatness_penalty_db"), ("WDM串扰", "wdm_xtalk_penalty_db"), ("WDM间隔", "wdm_spacing_penalty_db"), ("滤波", "decision_filter_penalty_db"), ("门限", "decision_threshold_penalty_db"), ("采样/抖动", "sampling_jitter_penalty_db")]:
+                    val = metrics.get(key, 0)
+                    if val > 0.01:
+                        labels.append(label); values.append(val)
+                if values:
+                    fig_adv, ax_adv = plt.subplots(figsize=(8, 2.8))
+                    ax_adv.bar(labels, values)
+                    ax_adv.set_ylabel("等效代价 (dB)")
+                    ax_adv.set_title("高级模块对 Q/BER 的贡献分解")
+                    ax_adv.grid(True, alpha=0.25)
+                    st.pyplot(fig_adv)
+
+        if metrics.get("decision_eye_enabled", False):
+            st.markdown("#### 👁️ Eye Diagram / 眼图分析（BER Analyzer 对齐显示）")
+            eye_t, eye_segments, eye_info = generate_eye_diagram_data(metrics, params)
+            ecols = st.columns(4)
+            ecols[0].metric("眼高 Eye Height", f"{eye_info['eye_height']:.2f}")
+            ecols[1].metric("眼宽 Eye Width", f"{eye_info['eye_width']:.2f} UI")
+            ecols[2].metric("噪声裕量", f"{eye_info['noise_margin']:.2f}")
+            ecols[3].metric("等效抖动", f"{eye_info['jitter_ui']:.2f} UI")
+            fig_eye, ax_eye = plt.subplots(figsize=(8, 3.2))
+            for seg in eye_segments[:70]:
+                ax_eye.plot(eye_t, seg, alpha=0.18, linewidth=0.8)
+            ax_eye.axvline(0, linestyle="--", linewidth=1.0, alpha=0.7, label="采样中心")
+            ax_eye.axhline(2*metrics.get('decision_threshold', 0.5)-1, linestyle=":", linewidth=1.2, alpha=0.8, label="判决门限")
+            ax_eye.set_xlabel("Time (UI)")
+            ax_eye.set_ylabel("Normalized Amplitude")
+            ax_eye.set_title("教学眼图：参数越差，眼高/眼宽越小，BER 越高")
+            ax_eye.grid(True, alpha=0.25)
+            ax_eye.legend(loc="best")
+            st.pyplot(fig_eye)
+            st.caption("眼图与 OptiSystem 的 Eye Diagram Analyzer 趋势对齐：噪声主要压缩眼高，色散/PMD/滤波/抖动主要压缩眼宽。")
+
+        if metrics.get("tx_impair_enabled", False):
+            tx1, tx2, tx3, tx4 = st.columns(4)
+            tx1.metric("发射端总代价", f"{metrics.get('tx_total_penalty_db', 0):.2f} dB")
+            tx2.metric("消光比 ER", f"{metrics.get('tx_ext_ratio_db', 0):.1f} dB")
+            tx3.metric("MZM 调制深度", f"{metrics.get('tx_modulation_depth', 1)*100:.0f}%")
+            tx4.metric("啁啾-色散代价", f"{metrics.get('tx_chirp_penalty_db', 0):.2f} dB")
+            st.markdown("#### 🚀 发射机非理想影响对比")
+            tx_compare_df = pd.DataFrame({
+                "发射端因素": ["消光比不足", "MZM 偏置偏离", "MZM 驱动不匹配", "激光器线宽", "RIN 强度噪声", "啁啾 × 色散"],
+                "当前参数": [
+                    f"ER={metrics.get('tx_ext_ratio_db', 0):.1f} dB",
+                    f"Vbias={metrics.get('mzm_bias_v', 0):.1f} V，Vπ={metrics.get('mzm_vpi', 0):.1f} V",
+                    f"Vpp={metrics.get('mzm_vpp', 0):.1f} V，深度={metrics.get('tx_modulation_depth', 1)*100:.0f}%",
+                    f"{metrics.get('laser_linewidth_mhz', 0):.2f} MHz",
+                    f"{metrics.get('tx_rin_db_hz', 0):.0f} dB/Hz",
+                    f"α={metrics.get('tx_chirp_alpha', 0):.1f}，累计色散={metrics.get('dispersion_total', 0):.0f} ps/nm",
+                ],
+                "等效代价": [
+                    f"{metrics.get('tx_er_penalty_db', 0):.2f} dB",
+                    f"{metrics.get('tx_mzm_bias_penalty_db', 0):.2f} dB",
+                    f"{metrics.get('tx_mzm_drive_penalty_db', 0):.2f} dB",
+                    f"{metrics.get('tx_linewidth_penalty_db', 0):.2f} dB",
+                    f"{metrics.get('tx_rin_penalty_db', 0):.2f} dB",
+                    f"{metrics.get('tx_chirp_penalty_db', 0):.2f} dB",
+                ],
+                "学生观察重点": [
+                    "ER 降低会让 0/1 电平差变小，眼图垂直开口减小",
+                    "偏置点偏离 Vπ/2 时，调制器不再处在线性工作区",
+                    "Vpp 太小调制不足，过大容易过驱动失真",
+                    "线宽会带来相位噪声，高阶相干调制更敏感",
+                    "RIN 表示激光强度抖动，OOK/PAM4 更敏感",
+                    "啁啾和色散共同作用，距离越长越明显",
+                ]
+            })
+            st.dataframe(tx_compare_df, use_container_width=True, hide_index=True)
+            penalty_items = [
+                metrics.get('tx_er_penalty_db', 0), metrics.get('tx_mzm_bias_penalty_db', 0),
+                metrics.get('tx_mzm_drive_penalty_db', 0), metrics.get('tx_linewidth_penalty_db', 0),
+                metrics.get('tx_rin_penalty_db', 0), metrics.get('tx_chirp_penalty_db', 0)
+            ]
+            fig_tx_pen, ax_tx_pen = plt.subplots(figsize=(8, 2.8))
+            ax_tx_pen.bar(["ER", "偏置", "Vpp", "线宽", "RIN", "啁啾"], penalty_items)
+            ax_tx_pen.set_ylabel("等效代价 (dB)")
+            ax_tx_pen.set_title("发射端非理想因素对链路质量的贡献")
+            ax_tx_pen.grid(True, alpha=0.25)
+            st.pyplot(fig_tx_pen)
+            st.caption("这些发射端参数主要改变调制质量和等效 SNR，因此最直观的变化在 Q 因子、BER、星座图散布和发射端总代价中。")
+
+        if metrics.get("receiver_noise_enabled", False):
+            nr1, nr2, nr3, nr4 = st.columns(4)
+            nr1.metric("接收机偏置", f"{metrics.get('rx_bias_voltage', 0):.1f} V")
+            nr2.metric("偏置代价", f"{metrics.get('rx_bias_penalty_db', 0):.2f} dB")
+            nr3.metric("等效暗电流", f"{metrics.get('rx_dark_current_na', 0):.2f} nA")
+            nr4.metric("热/散粒噪声", f"{metrics.get('rx_thermal_noise_dbm', -100):.1f}/{metrics.get('rx_shot_noise_dbm', -100):.1f} dBm")
+            st.markdown("#### 🔎 接收机非理想影响对比")
+            compare_df = pd.DataFrame({
+                "指标": ["Q 因子", "BER", "等效 SNR", "接收灵敏度"],
+                "原模型": [
+                    f"{metrics.get('base_q_factor', metrics['q_factor']):.2f}",
+                    f"{metrics.get('base_ber', metrics['ber']):.2e}",
+                    f"{metrics.get('base_effective_snr_db', 0):.2f} dB",
+                    f"{metrics.get('base_rx_sensitivity_dbm', metrics.get('rx_sensitivity_dbm', 0)):.1f} dBm",
+                ],
+                "加入接收机偏置/噪声后": [
+                    f"{metrics['q_factor']:.2f}",
+                    f"{metrics['ber']:.2e}",
+                    f"{metrics.get('effective_snr_db', 0):.2f} dB",
+                    f"{metrics.get('rx_sensitivity_dbm', 0):.1f} dBm",
+                ],
+                "变化": [
+                    f"{metrics['q_factor'] - metrics.get('base_q_factor', metrics['q_factor']):+.2f}",
+                    "变差" if metrics['ber'] > metrics.get('base_ber', metrics['ber']) else "基本不变",
+                    f"{metrics.get('effective_snr_db', 0) - metrics.get('base_effective_snr_db', 0):+.2f} dB",
+                    f"{metrics.get('rx_sensitivity_dbm', 0) - metrics.get('base_rx_sensitivity_dbm', metrics.get('rx_sensitivity_dbm', 0)):+.2f} dB",
+                ]
+            })
+            st.dataframe(compare_df, use_container_width=True, hide_index=True)
+            st.caption(f"接收机等效总代价：{metrics.get('rx_total_penalty_db', 0):.2f} dB。OSNR 主要是光链路指标，所以接收机参数主要改变 Q 因子、BER 和灵敏度，而不是直接改变 OSNR。")
+
+        st.markdown("#### 🧪 实验对比记录（用于论文/课堂分析）")
+        with st.expander("保存和比较当前参数组", expanded=False):
+            label_default = f"{params.get('modulation','')}-{params.get('distance',0)}km-{params.get('tx_power',0)}dBm"
+            exp_label = st.text_input("实验组名称", value=label_default, key="exp_compare_label")
+            c_save, c_clear = st.columns(2)
+            if c_save.button("💾 保存当前实验结果", key="save_exp_compare"):
+                if 'exp_compare_records' not in st.session_state:
+                    st.session_state.exp_compare_records = []
+                record = {
+                    "实验组": exp_label,
+                    "调制": params.get('modulation'),
+                    "距离(km)": params.get('distance'),
+                    "Tx功率(dBm)": params.get('tx_power'),
+                    "Rx功率(dBm)": round(metrics.get('rx_power', 0), 2),
+                    "OSNR(dB)": round(metrics.get('osnr', 0), 2),
+                    "Q因子": round(metrics.get('q_factor', 0), 2),
+                    "BER": f"{metrics.get('ber', 1):.2e}",
+                    "发射端代价(dB)": round(metrics.get('tx_total_penalty_db', 0), 2),
+                    "链路高级代价(dB)": round(metrics.get('link_advanced_penalty_db', 0), 2),
+                    "接收/判决代价(dB)": round(metrics.get('rx_total_penalty_db', 0)+metrics.get('analysis_penalty_db', 0), 2),
+                    "主要退化原因": max([
+                        (metrics.get('tx_total_penalty_db', 0), '发射机非理想'),
+                        (metrics.get('link_advanced_penalty_db', 0), '光纤/EDFA/WDM 链路代价'),
+                        (metrics.get('rx_total_penalty_db', 0), '接收机噪声'),
+                        (metrics.get('analysis_penalty_db', 0), '滤波/判决/眼图采样'),
+                        (metrics.get('dispersion_penalty_db', 0), '色散')
+                    ], key=lambda x: x[0])[1]
+                }
+                st.session_state.exp_compare_records.append(record)
+                st.success("已保存当前实验组，可继续调整参数后保存下一组。")
+            if c_clear.button("🧹 清空对比记录", key="clear_exp_compare"):
+                st.session_state.exp_compare_records = []
+                st.info("已清空。")
+            if st.session_state.get('exp_compare_records'):
+                df_cmp = pd.DataFrame(st.session_state.exp_compare_records)
+                st.dataframe(df_cmp, use_container_width=True, hide_index=True)
+                try:
+                    fig_cmp, ax_cmp = plt.subplots(figsize=(8, 2.8))
+                    ax_cmp.plot(range(len(df_cmp)), [float(x) for x in df_cmp['Q因子']], marker='o', label='Q因子')
+                    ax_cmp.set_xticks(range(len(df_cmp)))
+                    ax_cmp.set_xticklabels(df_cmp['实验组'], rotation=20, ha='right')
+                    ax_cmp.set_ylabel("Q 因子")
+                    ax_cmp.set_title("不同实验组 Q 因子对比")
+                    ax_cmp.grid(True, alpha=0.25)
+                    ax_cmp.legend(loc='best')
+                    st.pyplot(fig_cmp)
+                except Exception:
+                    pass
+                st.download_button("📥 下载实验对比表 CSV", df_cmp.to_csv(index=False).encode('utf-8-sig'), "optisystem_compare.csv", "text/csv")
 
         st.markdown("### 🖥️ 相干接收机 DSP 概念可视化")
         st.caption("用于展示色散补偿、载波相位恢复等 DSP 环节的趋势；该星座图为概念演示，不替代完整相干接收机 DSP 算法。")
@@ -1227,8 +1897,9 @@ def render_tab5_device_test(params):
     > **⚠️ 物理模型说明**：
     > 此模式已启用 **工程级误差模型**，包含以下真实效应：
     > * **IL**: 器件固有插入损耗。
-    > * **Connector Loss**: 接头损耗 (0.25 dB/个)。
+    > * **Connector Loss**: 可调接头基础损耗、污染/松动附加损耗。
     > * **Sensitivity Limit**: 光功率计底噪 (-70 dBm) 与饱和。
+    > * **Measurement Noise**: 可开关的 OPM 测量抖动；关闭后数值按理论模型稳定显示。
     """)
     CONN_LOSS = 0.25      
     NOISE_FLOOR = -70.0   
@@ -1256,6 +1927,17 @@ def render_tab5_device_test(params):
                 else:
                     spool_len = 0.0
                     alpha = 0.0
+
+                # 【新增】光衰减器/跳线接头影响：默认值与原模型一致，可模拟污染、松动与重复插拔误差。
+                default_conn_count = 3 if fiber_type != "无 (直连光功率计)" else 2
+                with st.expander("🔌 光衰减器接头影响", expanded=False):
+                    conn_count_single = st.number_input("接头数量", min_value=0, max_value=12, value=default_conn_count, step=1, key="voa_conn_count")
+                    conn_loss_single = st.number_input("单个接头损耗 (dB/个)", min_value=0.00, max_value=2.00, value=CONN_LOSS, step=0.05, key="voa_conn_loss")
+                    dirty_loss_single = st.number_input("接头污染/松动附加损耗 (dB/个)", min_value=0.00, max_value=5.00, value=0.00, step=0.05, key="voa_dirty_loss")
+                    enable_noise_single = st.checkbox("启用随机测量误差", value=False, key="voa_enable_noise", help="关闭时 OPM 读数按理论值稳定显示；开启后模拟重复插拔和光功率计读数抖动。")
+                    repeat_std_single = st.number_input("重复插拔测量抖动 σ (dB)", min_value=0.00, max_value=1.00, value=0.03, step=0.01, key="voa_repeat_std", disabled=not enable_noise_single)
+                    return_loss_db_single = st.slider("回波损耗 RL (dB，仅用于风险提示)", 20.0, 65.0, 45.0, 1.0, key="voa_return_loss")
+                    st.caption("接头损耗 = 接头数量 × (单个接头损耗 + 污染/松动附加损耗)。接头数量设为 0 时，接头相关损耗严格为 0。")
             else:
                 lengths_str = st.text_input("测试长度 (km，可输入单个数或逗号分隔列表)", "2, 10, 23, 29, 35")
                 st.caption(f"当前光纤衰减系数: {params['attenuation']} dB/km (读取自侧边栏)。单个长度用于输出一次 OPM 数值；多个长度用于线性拟合衰减系数。")
@@ -1263,11 +1945,16 @@ def render_tab5_device_test(params):
                 if optisystem_align:
                     fixed_device_loss_user = 0.0
                     conn_count_user = 0
+                    conn_loss_sweep_user = 0.0
+                    dirty_loss_sweep_user = 0.0
                     measurement_std_user = 0.0
                 else:
                     fixed_device_loss_user = st.number_input("固定器件插损 (dB)", min_value=0.0, max_value=10.0, value=0.80, step=0.05, key="sweep_fixed_loss")
                     conn_count_user = st.number_input("连接器数量", min_value=0, max_value=10, value=2, step=1, key="sweep_conn_count")
-                    measurement_std_user = st.number_input("OPM测量抖动 σ (dB)", min_value=0.0, max_value=1.0, value=0.03, step=0.01, key="sweep_meas_std")
+                    conn_loss_sweep_user = st.number_input("单个接头损耗 (dB/个)", min_value=0.00, max_value=2.00, value=CONN_LOSS, step=0.05, key="sweep_conn_loss")
+                    dirty_loss_sweep_user = st.number_input("接头污染/松动附加损耗 (dB/个)", min_value=0.00, max_value=5.00, value=0.00, step=0.05, key="sweep_dirty_loss")
+                    enable_noise_sweep = st.checkbox("启用 OPM 随机测量误差", value=False, key="sweep_enable_noise", help="关闭时多点扫参不加入随机扰动，便于和理论值/OptiSystem 对齐。")
+                    measurement_std_user = st.number_input("OPM测量抖动 σ (dB)", min_value=0.0, max_value=1.0, value=0.03, step=0.01, key="sweep_meas_std", disabled=not enable_noise_sweep)
                 voa_att = 0.0 
                 
         with c2:
@@ -1275,17 +1962,26 @@ def render_tab5_device_test(params):
                 voa_insertion_loss = 0.8 
                 if fiber_type != "无 (直连光功率计)":
                     fiber_loss = alpha * spool_len
-                    conn_count = 3 
                 else:
                     fiber_loss = 0.0
-                    conn_count = 2 
-                
-                total_loss = voa_att + voa_insertion_loss + (conn_count * CONN_LOSS) + fiber_loss
+
+                conn_count = int(conn_count_single)
+                connector_base_loss = conn_count * float(conn_loss_single)
+                connector_dirty_loss = conn_count * float(dirty_loss_single)
+                connector_total_loss = connector_base_loss + connector_dirty_loss
+                total_loss = voa_att + voa_insertion_loss + connector_total_loss + fiber_loss
                 power_at_detector = voa_input_p - total_loss
+                measurement_std_single = float(repeat_std_single) if enable_noise_single else 0.0
+                measurement_error = np.random.normal(0, measurement_std_single) if measurement_std_single > 0 else 0.0
+                measured_power = power_at_detector + measurement_error
                 
-                if power_at_detector > SATURATION_P: display_text, display_color = "HI (Overload)", "#FF0000"
-                elif power_at_detector < NOISE_FLOOR: display_text, display_color = f"{NOISE_FLOOR + np.random.normal(0, 1.5):.2f} dBm", "#555555"
-                else: display_text, display_color = f"{power_at_detector + np.random.normal(0, 0.03):.2f} dBm", "#00FF00" 
+                if power_at_detector > SATURATION_P:
+                    display_text, display_color = "HI (Overload)", "#FF0000"
+                elif power_at_detector < NOISE_FLOOR:
+                    floor_reading = NOISE_FLOOR + (np.random.normal(0, 1.5) if measurement_std_single > 0 else 0.0)
+                    display_text, display_color = f"{floor_reading:.2f} dBm", "#555555"
+                else:
+                    display_text, display_color = f"{measured_power:.2f} dBm", "#00FF00" 
 
                 st.markdown(f"""
                 <div class="device-box" style="border-color: {display_color};">
@@ -1294,7 +1990,20 @@ def render_tab5_device_test(params):
                 </div>
                 """, unsafe_allow_html=True)
                 
-                st.markdown(f"**📉 链路损耗清单 (总计 {total_loss:.2f} dB):**\n* VOA 设定衰减: {voa_att:.2f} dB\n* 器件与接头总插损: {(voa_insertion_loss + conn_count * CONN_LOSS):.2f} dB\n* 光纤盘损耗: {fiber_loss:.2f} dB")
+                st.markdown(f"""
+                **📉 链路损耗清单（总计 {total_loss:.2f} dB）：**
+                * VOA 设定衰减：{voa_att:.2f} dB
+                * VOA 固有插入损耗：{voa_insertion_loss:.2f} dB
+                * 光纤盘损耗：{fiber_loss:.2f} dB
+                * 接头基础损耗：{conn_count} × {float(conn_loss_single):.2f} = {connector_base_loss:.2f} dB
+                * 接头污染/松动损耗：{conn_count} × {float(dirty_loss_single):.2f} = {connector_dirty_loss:.2f} dB
+                * OPM 测量随机误差：{'开启' if measurement_std_single > 0 else '关闭'}，σ = {measurement_std_single:.2f} dB
+                * 理论输出功率：{power_at_detector:.2f} dBm
+                """)
+                if return_loss_db_single < 30:
+                    st.warning("⚠️ 当前回波损耗较低，说明反射较强；真实实验中可能引起激光器输出波动或读数不稳定。")
+                elif conn_count == 0:
+                    st.info("当前接头数量为 0，接头基础损耗与污染损耗均为 0；读数只受 VOA、固有插损、光纤损耗和测量误差影响。")
             else:
                 # 多点光纤长度扫参：恢复并增强原有数据表与拟合曲线输出。
                 # 该模式模拟光源、两端连接器、固定器件插损和光功率计测量误差，
@@ -1311,8 +2020,11 @@ def render_tab5_device_test(params):
                     alpha_true = float(params['attenuation'])
                     fixed_device_loss = float(fixed_device_loss_user)
                     conn_count = int(conn_count_user)
-                    fixed_loss = fixed_device_loss + conn_count * CONN_LOSS
-                    measurement_std = float(measurement_std_user)
+                    connector_base_loss = conn_count * float(conn_loss_sweep_user)
+                    connector_dirty_loss = conn_count * float(dirty_loss_sweep_user)
+                    connector_total_loss = connector_base_loss + connector_dirty_loss
+                    fixed_loss = fixed_device_loss + connector_total_loss
+                    measurement_std = float(measurement_std_user) if (not optisystem_align and 'enable_noise_sweep' in locals() and enable_noise_sweep) else 0.0
 
                     rows = []
                     for length_km in lengths:
@@ -1322,7 +2034,7 @@ def render_tab5_device_test(params):
                             measured_power = SATURATION_P
                             status = "过载"
                         elif ideal_power < NOISE_FLOOR:
-                            measured_power = NOISE_FLOOR + np.random.normal(0, 1.5)
+                            measured_power = NOISE_FLOOR + (np.random.normal(0, 1.5) if measurement_std > 0 else 0.0)
                             status = "低于底噪"
                         else:
                             measured_power = ideal_power + (np.random.normal(0, measurement_std) if measurement_std > 0 else 0.0)
@@ -1331,7 +2043,10 @@ def render_tab5_device_test(params):
                         rows.append({
                             "光纤长度 (km)": length_km,
                             "理论光纤损耗 (dB)": fiber_loss,
-                            "固定插损 (dB)": fixed_loss,
+                            "固定器件插损 (dB)": fixed_device_loss,
+                            "接头基础损耗 (dB)": connector_base_loss,
+                            "接头污染损耗 (dB)": connector_dirty_loss,
+                            "总固定损耗 (dB)": fixed_loss,
                             "理论接收功率 (dBm)": ideal_power,
                             "OPM读数 (dBm)": measured_power,
                             "测量状态": status,
@@ -1354,7 +2069,10 @@ def render_tab5_device_test(params):
                     st.dataframe(df_sweep.style.format({
                         "光纤长度 (km)": "{:.2f}",
                         "理论光纤损耗 (dB)": "{:.2f}",
-                        "固定插损 (dB)": "{:.2f}",
+                        "固定器件插损 (dB)": "{:.2f}",
+                        "接头基础损耗 (dB)": "{:.2f}",
+                        "接头污染损耗 (dB)": "{:.2f}",
+                        "总固定损耗 (dB)": "{:.2f}",
                         "理论接收功率 (dBm)": "{:.2f}",
                         "OPM读数 (dBm)": "{:.2f}",
                     }), use_container_width=True)
@@ -1392,7 +2110,7 @@ def render_tab5_device_test(params):
                     if optisystem_align:
                         st.caption("说明：当前为 OptiSystem 理想对齐模式，按 P_rx = P_tx - αL 计算；适合对齐 CW Laser → Optical Fiber → Optical Power Meter 的基础扫参结果。")
                     else:
-                        st.caption("说明：真实实验中通常记录不同光纤长度下的 OPM 功率读数，并用功率-长度斜率估计衰减系数；本模型加入了固定插损、连接器损耗、底噪、饱和和测量抖动。")
+                        st.caption(f"说明：真实实验中通常记录不同光纤长度下的 OPM 功率读数，并用功率-长度斜率估计衰减系数；本模型已拆分固定器件插损、接头基础损耗、接头污染/松动损耗、底噪、饱和和测量抖动。当前测量随机误差：{'开启' if measurement_std > 0 else '关闭'}，σ = {measurement_std:.2f} dB。")
 
     with st.expander("光隔离器 (ISO) - 波长敏感性测试"):
         c1, c2, c3 = st.columns(3)
@@ -1498,6 +2216,9 @@ def render_tab_ld():
         st.subheader("参数设置")
         ld_temp = st.slider("工作温度 (°C)", 10.0, 60.0, 25.0, 1.0)
         ld_current = st.slider("当前注入电流 (mA)", 0.0, 80.0, 12.0, 0.1)
+        ld_bias_voltage = st.slider("LD 偏置电压 Vbias (V)", 0.0, 3.0, 1.8, 0.01)
+        ld_series_resistance = st.slider("等效串联电阻 Rs (Ω)", 1.0, 30.0, 8.0, 0.5)
+        voltage_control_enabled = st.checkbox("用偏置电压联动注入电流", value=False, help="关闭时保持原来的电流控制；开启后根据 Vbias、导通电压和 Rs 估算注入电流。")
         chip_slope_efficiency = st.slider("芯片斜率效率 (mW/mA)", 0.05, 0.60, 0.20, 0.01)
         coupling_loss_db = st.slider("耦合损耗 (dB)", 1.0, 8.0, 4.0, 0.5)
         connector_loss_db = 0.25
@@ -1507,23 +2228,29 @@ def render_tab_ld():
         current_ith = base_ith * np.exp((ld_temp - 25.0) / T0)
         temp_slope_penalty = np.exp(-(ld_temp - 25.0) / 120.0)
         effective_slope = chip_slope_efficiency * temp_slope_penalty
+        turn_on_voltage = 1.18 + 0.002 * (ld_temp - 25.0)
+        voltage_est_current = max((ld_bias_voltage - turn_on_voltage) / max(ld_series_resistance, 1e-9) * 1000.0, 0.0)
+        drive_current_for_model = voltage_est_current if voltage_control_enabled else ld_current
+        thermal_voltage_penalty_db = max(0.0, (ld_bias_voltage - 2.4) * 2.0)
 
-        if ld_current < current_ith:
-            out_power_mw_chip = 0.0008 * ld_current
+        if drive_current_for_model < current_ith:
+            out_power_mw_chip = 0.0008 * drive_current_for_model
             state = "自发辐射/LED 区"
         else:
-            out_power_mw_chip = 0.0008 * current_ith + effective_slope * (ld_current - current_ith)
+            out_power_mw_chip = 0.0008 * current_ith + effective_slope * (drive_current_for_model - current_ith)
             state = "受激辐射/Laser 区"
 
-        out_power_dbm = 10 * np.log10(max(out_power_mw_chip, 1e-12)) - coupling_loss_db - connector_loss_db
+        out_power_dbm = 10 * np.log10(max(out_power_mw_chip, 1e-12)) - coupling_loss_db - connector_loss_db - thermal_voltage_penalty_db
         out_power_dbm = max(out_power_dbm, -70.0)
         real_output_mw = 10 ** (out_power_dbm / 10.0)
 
-        bias_ratio = max((ld_current - current_ith) / max(current_ith, 1e-9), 0.0)
+        bias_ratio = max((drive_current_for_model - current_ith) / max(current_ith, 1e-9), 0.0)
         relaxation_freq_ghz = 0.0 if bias_ratio <= 0 else 1.8 * np.sqrt(bias_ratio)
         rin_db_hz = -145 + 18 * np.exp(-bias_ratio) + max(0, (ld_temp - 25) * 0.15)
 
         st.metric("阈值电流 Ith", f"{current_ith:.2f} mA")
+        st.metric("等效驱动电流", f"{drive_current_for_model:.2f} mA")
+        st.metric("偏置电压/导通电压", f"{ld_bias_voltage:.2f} / {turn_on_voltage:.2f} V")
         st.metric("终端输出光功率", f"{out_power_dbm:.2f} dBm ({real_output_mw:.3f} mW)")
         st.metric("驰张振荡频率 fr", f"{relaxation_freq_ghz:.2f} GHz")
         st.metric("相对强度噪声 RIN", f"{rin_db_hz:.1f} dB/Hz")
@@ -1541,7 +2268,7 @@ def render_tab_ld():
 
         fig_ld, ax1 = plt.subplots(figsize=(8, 4))
         ax1.plot(i_array, terminal_p_array, linewidth=2, label='线性 P-I (mW)')
-        ax1.scatter([ld_current], [real_output_mw], s=70, zorder=5, label='当前工作点')
+        ax1.scatter([drive_current_for_model], [real_output_mw], s=70, zorder=5, label='当前工作点')
         ax1.axvline(current_ith, linestyle='--', label=f'阈值电流 ({current_ith:.1f} mA)')
         ax1.set_xlabel("注入电流 (mA)")
         ax1.set_ylabel("终端输出光功率 (mW)")
@@ -1565,6 +2292,8 @@ def render_tab_ld():
             mod_depth = st.slider("调制深度", 0.05, 1.00, 0.35, 0.05)
             damping_ghz = st.slider("阻尼因子 γ (GHz)", 0.5, 12.0, 4.0, 0.5)
             alpha_h = st.slider("线宽增强因子 αH", 1.0, 8.0, 4.0, 0.5)
+            enable_ld_noise = st.checkbox("叠加 RIN 噪声", value=True, key="enable_ld_rin_noise")
+            ld_noise_scale = st.slider("LD 噪声强度系数", 0.0, 5.0, 1.0, 0.1, key="ld_noise_scale")
 
         f = np.linspace(0.01, 20.0, 500)
         fr = max(relaxation_freq_ghz, 0.05)
@@ -1579,6 +2308,11 @@ def render_tab_ld():
         if self_pulsing_flag:
             sp_component = 0.22 * np.sin(2 * np.pi * max(fr, 0.5) * t_dyn) * np.exp(-t_dyn / 4)
         p_norm = 1.0 + mod_depth * resonance_gain * drive + sp_component
+        if enable_ld_noise and ld_noise_scale > 0:
+            rng_ld = np.random.default_rng(2025)
+            rin_linear = 10 ** (rin_db_hz / 10.0)
+            noise_sigma = min(0.25, np.sqrt(max(rin_linear * 12.5e9, 0.0)) * 0.02 * ld_noise_scale)
+            p_norm = p_norm + rng_ld.normal(0.0, noise_sigma, len(p_norm))
         p_norm = np.clip(p_norm, 0.02, None)
         chirp = alpha_h * np.gradient(np.log(p_norm), t_dyn)
 
@@ -1636,6 +2370,200 @@ def render_tab_fiber_param():
             st.error("❌ 折射率设置错误 (n1 必须大于 n2)")
 
 @st.fragment
+
+@st.fragment
+def render_tab_fiber_principle():
+    st.header("🧭 光纤传输原理实验：几何光学方法与波动理论")
+    st.markdown("""
+    本实验用于解释光纤为什么能够导光、为什么会出现单模/多模，以及截止波长与 V 参数的关系。
+    模型采用教学型近似，适合与后续的损耗、带宽、截止波长、色散和系统设计实验衔接。
+    """)
+
+    sub_geo, sub_wave, sub_compare = st.tabs(["① 几何光学导光", "② 波动理论与模式", "③ 对比分析与报告"])
+
+    with sub_geo:
+        st.subheader("① 几何光学方法：全反射、数值孔径与光线轨迹")
+        col_ctrl, col_plot = st.columns([1, 1.45])
+        with col_ctrl:
+            st.markdown("#### 参数设置")
+            n0 = st.number_input("外界介质折射率 n₀", min_value=1.000, max_value=1.600, value=1.000, step=0.001, format="%.3f", key="fp_n0")
+            n1 = st.number_input("纤芯折射率 n₁", min_value=1.300, max_value=1.700, value=1.468, step=0.001, format="%.3f", key="fp_n1")
+            n2 = st.number_input("包层折射率 n₂", min_value=1.250, max_value=1.690, value=1.462, step=0.001, format="%.3f", key="fp_n2")
+            core_radius_um = st.slider("纤芯半径 a (μm)", 3.0, 62.5, 25.0, 0.5, key="fp_core_radius")
+            theta_in_deg = st.slider("空气中入射角 θ₀ (°)", 0.0, 45.0, 8.0, 0.5, key="fp_theta_in")
+            alpha_geo = st.slider("光纤衰减系数 α (dB/km)", 0.15, 0.50, 0.20, 0.01, key="fp_alpha_geo")
+            length_geo = st.slider("传输长度 L (km)", 1.0, 50.0, 10.0, 1.0, key="fp_length_geo")
+
+            if n1 <= n2:
+                st.error("参数不合理：纤芯折射率 n₁ 必须大于包层折射率 n₂。")
+                return
+            na = float(np.sqrt(max(n1**2 - n2**2, 0.0)))
+            theta_accept_deg = float(np.degrees(np.arcsin(min(na / max(n0, 1e-12), 1.0))))
+            theta_c_deg = float(np.degrees(np.arcsin(min(n2 / n1, 1.0))))
+            sin_theta_core = min(n0 * np.sin(np.radians(theta_in_deg)) / n1, 1.0)
+            theta_core_deg = float(np.degrees(np.arcsin(sin_theta_core)))
+            guided = theta_in_deg <= theta_accept_deg + 1e-9
+            pout_ratio = 10 ** (-alpha_geo * length_geo / 10.0) if guided else 0.0
+
+            st.markdown("#### 计算结果")
+            g1, g2 = st.columns(2)
+            g1.metric("数值孔径 NA", f"{na:.4f}")
+            g2.metric("最大接收角 θmax", f"{theta_accept_deg:.2f}°")
+            g3, g4 = st.columns(2)
+            g3.metric("临界角 θc", f"{theta_c_deg:.2f}°")
+            g4.metric("输出功率比例", f"{pout_ratio:.3f}")
+            if guided:
+                st.success("✅ 当前入射角满足接收条件，光线可在纤芯中形成全反射导光。")
+            else:
+                st.warning("⚠️ 当前入射角超过最大接收角，耦合效率很低，不能形成有效导光。")
+
+        with col_plot:
+            st.markdown("#### 光线传播示意")
+            a = core_radius_um
+            z_max = 10.0
+            z = np.linspace(0, z_max, 1200)
+            if guided and theta_core_deg > 0.05:
+                slope = np.tan(np.radians(theta_core_deg)) * z_max / 2.8
+                raw_y = slope * z
+                period = 4 * a
+                y = ((raw_y + a) % period)
+                y = np.where(y <= 2 * a, y - a, 3 * a - y)
+            elif guided:
+                y = np.zeros_like(z)
+            else:
+                y = np.tan(np.radians(max(theta_core_deg, 0.5))) * z * z_max / 2.8
+                y = np.clip(y, -a * 1.4, a * 1.4)
+
+            fig, ax = plt.subplots(figsize=(8, 3.7))
+            ax.fill_between(z, -a, a, alpha=0.18, label="纤芯")
+            ax.axhline(a, linestyle="--", linewidth=1.2, label="纤芯/包层边界")
+            ax.axhline(-a, linestyle="--", linewidth=1.2)
+            ax.plot(z, y, linewidth=2.2, label="入射光线轨迹")
+            if not guided:
+                ax.text(z_max * 0.52, a * 0.72, "超过接收角：泄漏/辐射", fontsize=11)
+            ax.set_xlabel("轴向传播距离（归一化）")
+            ax.set_ylabel("径向位置 (μm)")
+            ax.set_title("阶跃型光纤中的几何光学导光示意")
+            ax.set_ylim(-a * 1.55, a * 1.55)
+            ax.legend(loc="upper right")
+            st.pyplot(fig)
+
+            st.caption("说明：该图用于观察全反射与接收角条件，光线路径为教学示意，不代表真实电磁场模式分布。")
+
+    with sub_wave:
+        st.subheader("② 波动理论方法：V 参数、单模条件与 LP 模式")
+        col_ctrl, col_view = st.columns([1, 1.45])
+        with col_ctrl:
+            st.markdown("#### 参数设置")
+            n1_w = st.number_input("纤芯折射率 n₁ ", min_value=1.300, max_value=1.700, value=1.468, step=0.001, format="%.3f", key="fp_n1_w")
+            n2_w = st.number_input("包层折射率 n₂ ", min_value=1.250, max_value=1.690, value=1.462, step=0.001, format="%.3f", key="fp_n2_w")
+            radius_w_um = st.slider("纤芯半径 a (μm) ", 2.0, 62.5, 4.5, 0.5, key="fp_radius_w")
+            wavelength_nm = st.slider("工作波长 λ (nm)", 800, 1700, 1550, 10, key="fp_wavelength_nm")
+            lp_mode = st.selectbox("近似显示的 LP 模式", ["LP01", "LP11", "LP21", "LP02"], key="fp_lp_mode")
+            sweep_target = st.radio("参数扫描", ["波长扫描", "纤芯半径扫描"], horizontal=True, key="fp_sweep_target")
+
+            if n1_w <= n2_w:
+                st.error("参数不合理：纤芯折射率 n₁ 必须大于包层折射率 n₂。")
+                return
+            na_w = float(np.sqrt(max(n1_w**2 - n2_w**2, 0.0)))
+            wavelength_um = wavelength_nm / 1000.0
+            v_number = 2 * np.pi * radius_w_um * na_w / wavelength_um
+            mode_count = max(1.0, v_number**2 / 2.0)
+            cutoff_nm = 2 * np.pi * radius_w_um * na_w / 2.405 * 1000.0
+            is_single_mode = v_number < 2.405
+
+            st.markdown("#### 计算结果")
+            w1, w2 = st.columns(2)
+            w1.metric("归一化频率 V", f"{v_number:.3f}")
+            w2.metric("截止波长 λc", f"{cutoff_nm:.0f} nm")
+            w3, w4 = st.columns(2)
+            w3.metric("模式数近似 M≈V²/2", f"{mode_count:.1f}")
+            w4.metric("光纤状态", "单模" if is_single_mode else "多模")
+            if is_single_mode:
+                st.success("✅ V < 2.405，当前参数满足阶跃型光纤近似单模条件。")
+            else:
+                st.info("ℹ️ V ≥ 2.405，当前参数会支持多个传输模式，容易出现模式色散。")
+
+        with col_view:
+            st.markdown("#### 模式场强近似分布")
+            grid = np.linspace(-1.25, 1.25, 180)
+            X, Y = np.meshgrid(grid, grid)
+            R = np.sqrt(X**2 + Y**2)
+            Phi = np.arctan2(Y, X)
+            aperture = R <= 1.0
+            if lp_mode == "LP01":
+                field = np.exp(-(R / 0.55)**2)
+            elif lp_mode == "LP11":
+                field = (R / 0.55) * np.cos(Phi) * np.exp(-(R / 0.62)**2)
+            elif lp_mode == "LP21":
+                field = (R / 0.60)**2 * np.cos(2 * Phi) * np.exp(-(R / 0.70)**2)
+            else:
+                field = (1 - 2.2 * R**2) * np.exp(-(R / 0.72)**2)
+            intensity = np.where(aperture, field**2, np.nan)
+
+            fig_mode, ax_mode = plt.subplots(figsize=(5.0, 4.2))
+            im = ax_mode.imshow(intensity, extent=[-1, 1, -1, 1], origin="lower")
+            circle = plt.Circle((0, 0), 1, fill=False, linewidth=1.5)
+            ax_mode.add_patch(circle)
+            ax_mode.set_title(f"{lp_mode} 模式场强分布（归一化示意）")
+            ax_mode.set_xlabel("x / a")
+            ax_mode.set_ylabel("y / a")
+            fig_mode.colorbar(im, ax=ax_mode, fraction=0.046, pad=0.04, label="归一化强度")
+            st.pyplot(fig_mode)
+
+            st.markdown("#### V 参数扫描")
+            fig_sweep, ax_sweep = plt.subplots(figsize=(7.2, 3.4))
+            if sweep_target == "波长扫描":
+                lam_arr_nm = np.linspace(800, 1700, 240)
+                v_arr = 2 * np.pi * radius_w_um * na_w / (lam_arr_nm / 1000.0)
+                ax_sweep.plot(lam_arr_nm, v_arr, linewidth=2)
+                ax_sweep.axvline(wavelength_nm, linestyle=":", linewidth=1.2, label="当前 λ")
+                ax_sweep.set_xlabel("工作波长 λ (nm)")
+            else:
+                r_arr_um = np.linspace(2.0, 62.5, 240)
+                v_arr = 2 * np.pi * r_arr_um * na_w / wavelength_um
+                ax_sweep.plot(r_arr_um, v_arr, linewidth=2)
+                ax_sweep.axvline(radius_w_um, linestyle=":", linewidth=1.2, label="当前 a")
+                ax_sweep.set_xlabel("纤芯半径 a (μm)")
+            ax_sweep.axhline(2.405, linestyle="--", linewidth=1.2, label="单模截止 V=2.405")
+            ax_sweep.set_ylabel("V 参数")
+            ax_sweep.set_title("V 参数与单模/多模状态变化")
+            ax_sweep.legend(loc="best")
+            st.pyplot(fig_sweep)
+
+    with sub_compare:
+        st.subheader("③ 几何光学与波动理论对比分析")
+        st.markdown("""
+        | 对比项 | 几何光学方法 | 波动理论方法 |
+        |---|---|---|
+        | 主要解释对象 | 全反射、临界角、数值孔径、接收角 | V 参数、LP 模式、截止波长、单模/多模 |
+        | 适用场景 | 多模光纤与直观导光分析 | 单模光纤、少模光纤与模式分析 |
+        | 可观察现象 | 入射角过大导致不能有效耦合 | V 参数变化导致模式数和截止状态变化 |
+        | 教学作用 | 帮助学生理解“光为什么被约束在纤芯中” | 帮助学生理解“光纤为什么有模式和截止波长” |
+        | 局限性 | 无法解释真实电磁场模式分布 | 数学模型较复杂，教学中宜采用可视化近似 |
+        """)
+
+        st.markdown("#### 自动生成实验结论")
+        conclusion = """# 光纤传输原理虚拟仿真实验报告
+
+## 一、实验目的
+理解阶跃型光纤的导光条件，掌握全反射、数值孔径、最大接收角、V 参数、单模条件和截止波长之间的关系。
+
+## 二、实验原理
+几何光学方法把光看作射线，重点分析纤芯/包层界面处的全反射条件；波动理论把光看作电磁波，重点分析归一化频率 V 与 LP 模式分布。
+
+## 三、实验任务
+1. 调节纤芯和包层折射率，观察 NA 与最大接收角的变化。
+2. 调节入射角，判断是否满足光纤接收条件。
+3. 调节波长和纤芯半径，观察 V 参数与单模/多模状态变化。
+4. 对比 LP01、LP11、LP21 等模式场强分布。
+
+## 四、实验结论
+几何光学方法适合解释光纤导光的直观条件，波动理论适合解释模式、截止波长和单模传输条件。二者结合可以形成从基础物理原理到光纤通信系统仿真的完整教学链条。
+"""
+        st.download_button("📥 下载本实验报告模板", conclusion, "Fiber_Transmission_Principle_Report.md", mime="text/markdown")
+        st.info("建议教学安排：该实验可放在光纤损耗、带宽、截止波长和色散测量实验之前，作为理论前置实验。")
+
 def render_tab_edfa():
     st.header("🔋 EDFA 掺铒光纤放大器工程仿真")
     st.markdown("该模块由原经验增益曲线升级为小信号增益、增益饱和、噪声指数和 ASE 噪声共同作用的工程近似模型。")
@@ -2043,6 +2971,7 @@ with tab1: render_tab1_link_sim(params, metrics, client, active_model_id)
 with tab5: render_tab5_device_test(params)
 with tab_ld: render_tab_ld()
 with tab_fiber_param: render_tab_fiber_param()
+with tab_fiber_principle: render_tab_fiber_principle()
 with tab_edfa: render_tab_edfa()
 with tab_otdr: render_tab_otdr(client, active_model_id)
 with tab2: render_tab2_ai_diag(params, metrics, client, active_model_id)
