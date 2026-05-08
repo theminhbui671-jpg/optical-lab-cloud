@@ -696,64 +696,71 @@ def encode_cmi(bits):
                 encoded_bits.extend([1, 1]); last_one_level = 1
     return encoded_bits
 
-def encode_5b6b(bits):
-    """工程化 5B6B 教学编码：按运行数字选择 6 bit 码字，尽量保持直流平衡并避免长连 0/1。"""
-    def to_dec(arr):
-        return int("".join(str(x) for x in arr), 2)
+def encode_5b6b(bits, mode="auto"):
+    """
+    教材标准 5B6B 查表编码（表 5B6B-1）。
 
-    def max_run(seq):
-        best = cur = 1
-        for i in range(1, len(seq)):
-            if seq[i] == seq[i-1]:
-                cur += 1
-                best = max(best, cur)
-            else:
-                cur = 1
-        return best
+    参数：
+    - mode="I"：固定采用模式 I。
+    - mode="II"：固定采用模式 II。
+    - mode="auto"：根据运行数字差自动在模式 I / II 中选择，使累计数字差尽量接近 0。
 
-    # 生成候选码字：优先使用 3/3 平衡或 4/2、2/4 弱不平衡码字，过滤长连码。
-    candidates = []
-    for val in range(64):
-        seq = [(val >> b) & 1 for b in range(5, -1, -1)]
-        ones = sum(seq)
-        disparity = ones - (6 - ones)
-        if abs(disparity) <= 2 and max_run(seq) <= 4:
-            candidates.append((seq, disparity, max_run(seq), val))
-    candidates.sort(key=lambda item: (abs(item[1]), item[2], item[3]))
+    说明：输入比特按 5 bit 分组，不足 5 bit 时末尾补 0；每组映射为 6 bit 码字。
+    """
+    codebook_I = {
+        "00000": "110010", "00001": "110011", "00010": "110110", "00011": "100011",
+        "00100": "110101", "00101": "100101", "00110": "100110", "00111": "100111",
+        "01000": "101011", "01001": "101001", "01010": "101010", "01011": "001011",
+        "01100": "101100", "01101": "101101", "01110": "101110", "01111": "001110",
+        "10000": "110001", "10001": "111001", "10010": "111010", "10011": "010011",
+        "10100": "110100", "10101": "010101", "10110": "010110", "10111": "010111",
+        "11000": "111000", "11001": "011001", "11010": "011010", "11011": "011011",
+        "11100": "011100", "11101": "011101", "11110": "011110", "11111": "001101",
+    }
+    codebook_II = {
+        "00000": "110010", "00001": "100001", "00010": "100010", "00011": "100011",
+        "00100": "100100", "00101": "100101", "00110": "100110", "00111": "000111",
+        "01000": "101000", "01001": "101001", "01010": "101010", "01011": "001011",
+        "01100": "101100", "01101": "000101", "01110": "000110", "01111": "001110",
+        "10000": "110001", "10001": "010001", "10010": "010010", "10011": "010011",
+        "10100": "110100", "10101": "010101", "10110": "010110", "10111": "010100",
+        "11000": "011000", "11001": "011001", "11010": "011010", "11011": "001010",
+        "11100": "011100", "11101": "001001", "11110": "001100", "11111": "001101",
+    }
 
-    # 为 32 个 5bit 输入分配互不重复的正/负候选码字。
-    codebook = {}
-    used = set()
-    for data_val in range(32):
-        desired = (bin(data_val).count('1') - (5 - bin(data_val).count('1')))
-        pool = [c for c in candidates if c[3] not in used]
-        if not pool:
-            break
-        chosen = min(pool, key=lambda c: (abs(c[1] + desired * 0.2), c[2], abs(c[3] - data_val * 2)))
-        used.add(chosen[3])
-        seq = chosen[0]
-        inv = [1 - x for x in seq]
-        codebook[data_val] = (seq, inv)
+    def disparity(code):
+        return code.count("1") - code.count("0")
 
-    encoded_bits = []
-    running_disparity = 0
-    padding = len(bits) % 5
     work_bits = bits[:]
+    padding = len(work_bits) % 5
     if padding != 0:
         work_bits.extend([0] * (5 - padding))
 
+    encoded_bits = []
+    running_disparity = 0
+    selected_mode = str(mode).upper()
+
     for i in range(0, len(work_bits), 5):
-        val = to_dec(work_bits[i:i+5])
-        pos_code, neg_code = codebook.get(val, (work_bits[i:i+5] + [0], work_bits[i:i+5] + [1]))
-        disp_pos = sum(pos_code) - (6 - sum(pos_code))
-        disp_neg = sum(neg_code) - (6 - sum(neg_code))
-        if abs(running_disparity + disp_pos) <= abs(running_disparity + disp_neg):
-            out_chunk = pos_code
-            running_disparity += disp_pos
+        block = "".join(str(b) for b in work_bits[i:i + 5])
+        code_I = codebook_I[block]
+        code_II = codebook_II[block]
+
+        if selected_mode == "I":
+            selected_code = code_I
+        elif selected_mode == "II":
+            selected_code = code_II
         else:
-            out_chunk = neg_code
-            running_disparity += disp_neg
-        encoded_bits.extend(out_chunk)
+            disp_I = disparity(code_I)
+            disp_II = disparity(code_II)
+            # 自动模式：选择后累计运行数字差越接近 0 越优；若相同则采用模式 I。
+            if abs(running_disparity + disp_I) <= abs(running_disparity + disp_II):
+                selected_code = code_I
+            else:
+                selected_code = code_II
+
+        running_disparity += disparity(selected_code)
+        encoded_bits.extend([int(x) for x in selected_code])
+
     return encoded_bits
 
 def apply_channel_effects(digital_signal, osnr, bandwidth_factor=0.2):
@@ -2766,7 +2773,7 @@ def render_tab4_coding(metrics):
             raw_bits = clean_input if clean_input else [1, 0, 1, 0]
 
     if code_type == "5B6B":
-        st.info("5B6B 当前采用运行数字受控的工程化教学编码：按 5 bit 分组映射为 6 bit，优先选择直流平衡、短连码码字，可展示真实 5B6B 实验中常见的码率开销、运行数字控制、长连码抑制与接收波形退化趋势。")
+        st.info("5B6B 当前采用教材表 5B6B-1 的标准查表编码：按 5 bit 分组映射为 6 bit，并在自动模式下根据运行数字差选择模式 I / 模式 II，展示码率开销、直流平衡、长连码抑制与接收波形退化趋势。")
 
     use_manual = st.checkbox("启用手动调整模式 (覆盖 Tab 1 物理计算结果)", value=False, key="tab4_manual_mode")
     
@@ -2811,7 +2818,7 @@ def render_tab4_coding(metrics):
     c4.metric("最长连码", f"{_max_run(encoded_bits)} bit")
 
     if code_type == "5B6B":
-        st.caption("5B6B 理论有效码率约为 5/6≈0.833；运行数字差越接近 0、最长连码越短，越接近实际线路编码对直流平衡和时钟恢复的要求。")
+        st.caption("本实验采用教材标准 5B6B 查表编码。5B6B 理论有效码率约为 5/6≈0.833；运行数字差越接近 0、最长连码越短，越有利于直流平衡和时钟恢复。")
     
     fig3, (ax_orig, ax_code, ax_rx) = plt.subplots(3, 1, figsize=(10, 8), sharex=False)
     plt.subplots_adjust(hspace=0.5)
