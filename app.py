@@ -2819,18 +2819,36 @@ def render_tab4_coding(metrics):
 
     if code_type == "5B6B":
         st.caption("本实验采用教材标准 5B6B 查表编码。5B6B 理论有效码率约为 5/6≈0.833；运行数字差越接近 0、最长连码越短，越有利于直流平衡和时钟恢复。")
-    
+
+    def plot_bit_waveform(ax, bits, title, color, xlabel="码元序号"):
+        """完整显示数字码元波形：每个 bit 占 1 个码元周期，最后一个码元不会被截断。"""
+        bits = list(bits)
+        if not bits:
+            bits = [0]
+        x = np.arange(len(bits) + 1)
+        y = np.r_[bits, bits[-1]]
+        ax.step(x, y, where='post', color=color, linewidth=2)
+        ax.set_title(title, color='white')
+        ax.set_xlim(0, len(bits))
+        ax.set_ylim(-0.2, 1.2)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("电平")
+        ax.grid(True, alpha=0.3)
+        if len(bits) <= 30:
+            ax.set_xticks(np.arange(0, len(bits) + 1, 1))
+
     fig3, (ax_orig, ax_code, ax_rx) = plt.subplots(3, 1, figsize=(10, 8), sharex=False)
-    plt.subplots_adjust(hspace=0.5)
-    ax_orig.step(range(len(raw_bits)), raw_bits, where='post', color='#00FF00', linewidth=2)
-    ax_orig.set_title("1. 原始二进制数据 (NRZ)", color='white')
-    ax_orig.set_ylim(-0.2, 1.2)
-    x_code = np.linspace(0, len(raw_bits), len(encoded_bits))
-    ax_code.step(x_code, encoded_bits, where='post', color='#00FFFF', linewidth=2)
-    ax_code.set_title(f"2. {code_type} 编码后信号", color='white')
-    ax_code.set_ylim(-0.2, 1.2)
-    x_rx = np.linspace(0, len(raw_bits), len(rx_signal))
+    plt.subplots_adjust(hspace=0.55)
+    plot_bit_waveform(ax_orig, raw_bits, "1. 原始二进制数据 (NRZ)", '#00FF00', xlabel="输入比特序号")
+    plot_bit_waveform(ax_code, encoded_bits, f"2. {code_type} 编码后信号", '#00FFFF', xlabel="编码后码元序号")
+    x_rx = np.linspace(0, len(encoded_bits), len(rx_signal))
     ax_rx.plot(x_rx, rx_signal, color='#FF4B4B', linewidth=1.5)
+    ax_rx.set_xlim(0, len(encoded_bits))
+    ax_rx.set_ylim(-0.2, 1.2)
+    ax_rx.set_xlabel("编码后码元序号")
+    ax_rx.set_ylabel("接收幅度")
+    if len(encoded_bits) <= 30:
+        ax_rx.set_xticks(np.arange(0, len(encoded_bits) + 1, 1))
     mode_str = "手动调试" if use_manual else "物理仿真"
     ax_rx.set_title(f"3. 接收波形 ({mode_str}: OSNR={current_osnr:.1f}dB, BW={current_bw})", color='white')
     st.pyplot(fig3)
@@ -2851,15 +2869,21 @@ def render_tab4_coding(metrics):
     st.markdown("---"); st.markdown("### 🆚 深度对比: 1B2B (CMI) vs 5B6B")
     bits_cmi, bits_5b6b = encode_cmi(raw_bits), encode_5b6b(raw_bits)
     fig_cmp, (ax_cmi, ax_5b6b) = plt.subplots(2, 1, figsize=(10, 6))
-    plt.subplots_adjust(hspace=0.4)
-    t_cmi = np.linspace(0, len(raw_bits), len(bits_cmi) + 1)
-    ax_cmi.step(t_cmi[:-1], bits_cmi, where='post', color='#00FFFF', linewidth=1.5)
-    ax_cmi.set_title(f"1B2B (CMI) 编码 | 码元数: {len(bits_cmi)} | 码率={len(raw_bits)/max(len(bits_cmi),1):.3f}", color='white')
-    ax_cmi.set_ylim(-0.2, 1.2)
-    t_5b6b = np.linspace(0, len(raw_bits), len(bits_5b6b) + 1)
-    ax_5b6b.step(t_5b6b[:-1], bits_5b6b, where='post', color='#FF00FF', linewidth=1.5)
-    ax_5b6b.set_title(f"5B6B 编码 | 码元数: {len(bits_5b6b)} | 码率={len(raw_bits)/max(len(bits_5b6b),1):.3f}", color='white')
-    ax_5b6b.set_ylim(-0.2, 1.2); ax_5b6b.set_xlabel("Normalized Time (Bit Periods)")
+    plt.subplots_adjust(hspace=0.45)
+    plot_bit_waveform(
+        ax_cmi,
+        bits_cmi,
+        f"1B2B (CMI) 编码 | 码元数: {len(bits_cmi)} | 码率={len(raw_bits)/max(len(bits_cmi),1):.3f}",
+        '#00FFFF',
+        xlabel="CMI 编码后码元序号"
+    )
+    plot_bit_waveform(
+        ax_5b6b,
+        bits_5b6b,
+        f"5B6B 编码 | 码元数: {len(bits_5b6b)} | 码率={len(raw_bits)/max(len(bits_5b6b),1):.3f}",
+        '#FF00FF',
+        xlabel="5B6B 编码后码元序号"
+    )
     st.pyplot(fig_cmp)
 
 @st.fragment
