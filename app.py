@@ -18,6 +18,65 @@ import math
 import time
 import random
 
+import matplotlib
+import matplotlib.font_manager as fm
+
+# ==========================================
+# 中文字体兼容配置：本地 + Streamlit 云端
+# ==========================================
+def configure_chinese_font():
+    """
+    解决 Matplotlib 图表中文在云端显示为方框的问题。
+    优先读取项目内 fonts 文件夹中的字体文件；云端和本地均可使用。
+    """
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    font_candidates = [
+        os.path.join(base_dir, "fonts", "NotoSansCJKsc-Regular.otf"),
+        os.path.join(base_dir, "fonts", "NotoSansSC-Regular.otf"),
+        os.path.join(base_dir, "fonts", "SourceHanSansSC-Regular.otf"),
+        os.path.join(base_dir, "fonts", "SimHei.ttf"),
+    ]
+
+    selected_font_name = None
+
+    for font_path in font_candidates:
+        if os.path.exists(font_path):
+            try:
+                fm.fontManager.addfont(font_path)
+                selected_font_name = fm.FontProperties(fname=font_path).get_name()
+                break
+            except Exception:
+                selected_font_name = None
+
+    if selected_font_name:
+        matplotlib.rcParams["font.family"] = "sans-serif"
+        matplotlib.rcParams["font.sans-serif"] = [
+            selected_font_name,
+            "Noto Sans CJK SC",
+            "Microsoft YaHei",
+            "SimHei",
+            "Arial Unicode MS",
+            "DejaVu Sans",
+            "sans-serif",
+        ]
+    else:
+        matplotlib.rcParams["font.family"] = "sans-serif"
+        matplotlib.rcParams["font.sans-serif"] = [
+            "Noto Sans CJK SC",
+            "Microsoft YaHei",
+            "SimHei",
+            "PingFang SC",
+            "Arial Unicode MS",
+            "DejaVu Sans",
+            "sans-serif",
+        ]
+
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    return selected_font_name or "系统默认中文字体候选"
+
+configure_chinese_font()
+
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
@@ -1198,8 +1257,8 @@ st.set_page_config(
 )
 
 plt.style.use('dark_background')
-plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', 'SimHei', 'Arial Unicode MS', 'sans-serif'] 
-plt.rcParams['axes.unicode_minus'] = False 
+# dark_background 样式可能会影响部分 rcParams，因此样式启用后再次应用中文字体配置。
+configure_chinese_font()
 plt.rcParams['grid.alpha'] = 0.3
 plt.rcParams['axes.grid'] = True
 plt.rcParams['font.size'] = 10
