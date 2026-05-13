@@ -188,6 +188,12 @@ def calculate_simulation(params):
     工程近似链路模型：链路预算 + EDFA ASE + 简化 GN 非线性噪声 + 色散功率代价 + 不同调制格式 BER 近似。
     该模型比原教学模型更接近物理实验趋势，但仍不替代 OptiSystem/VPI/SSFM 等高保真仿真。
     """
+    # 真实实验近似模式：默认启用。
+    # 目的：不再只显示过于理想的 Q=几十、BER=1e-18，
+    # 而是把发射机、光纤接头/熔接、EDFA、接收机与判决器的常见非理想因素
+    # 作为默认链路代价计入结果，使基准值更接近 OptiSystem/真实教学实验趋势。
+    realistic_experiment_mode = bool(params.get('realistic_experiment_mode', True))
+
     h = 6.62607015e-34
     c = 2.99792458e8
     bit_rate = 25e9                 # 等效单通道速率，用于教学近似
@@ -203,7 +209,7 @@ def calculate_simulation(params):
     modulation = params['modulation']
 
     # 【新增】OptiSystem 对齐的发射端非理想参数。默认关闭，关闭时完全保持原模型。
-    tx_impair_enabled = bool(params.get('tx_impair_enabled', False))
+    tx_impair_enabled = bool(params.get('tx_impair_enabled', realistic_experiment_mode))
     tx_ext_ratio_db = float(params.get('tx_ext_ratio_db', 12.0))
     mzm_bias_v = float(params.get('mzm_bias_v', 2.0))
     mzm_vpi = max(float(params.get('mzm_vpi', 4.0)), 0.1)
@@ -213,7 +219,7 @@ def calculate_simulation(params):
     tx_chirp_alpha = float(params.get('tx_chirp_alpha', 0.0))
 
     # 【新增】OptiSystem 对齐的光纤/EDFA/WDM/判决分析高级参数。默认关闭，关闭时保持原模型。
-    fiber_advanced_enabled = bool(params.get('fiber_advanced_enabled', False))
+    fiber_advanced_enabled = bool(params.get('fiber_advanced_enabled', realistic_experiment_mode))
     fiber_pmd_ps_sqrtkm = float(params.get('fiber_pmd_ps_sqrtkm', 0.05))
     fiber_gamma_wkm = float(params.get('fiber_gamma_wkm', 1.3))
     fiber_aeff_um2 = float(params.get('fiber_aeff_um2', 80.0))
@@ -225,13 +231,13 @@ def calculate_simulation(params):
     span_length_setting_km = float(params.get('span_length_setting_km', 80.0))
     link_margin_db = float(params.get('link_margin_db', 3.0))
 
-    edfa_advanced_enabled = bool(params.get('edfa_advanced_enabled', False))
+    edfa_advanced_enabled = bool(params.get('edfa_advanced_enabled', realistic_experiment_mode))
     edfa_nf_db = float(params.get('edfa_nf_db', 5.5))
     edfa_psat_dbm = float(params.get('edfa_psat_dbm', 20.0))
     edfa_ase_bw_ghz = float(params.get('edfa_ase_bw_ghz', 12.5))
     edfa_gain_flatness_db = float(params.get('edfa_gain_flatness_db', 0.5))
 
-    decision_eye_enabled = bool(params.get('decision_eye_enabled', False))
+    decision_eye_enabled = bool(params.get('decision_eye_enabled', realistic_experiment_mode))
     rx_filter_bw_ghz = float(params.get('rx_filter_bw_ghz', 18.0))
     rx_filter_type = params.get('rx_filter_type', 'Bessel')
     decision_threshold = float(params.get('decision_threshold', 0.5))
@@ -261,7 +267,13 @@ def calculate_simulation(params):
     nf_lin = 10 ** (nf_db / 10.0)
     psat_dbm = edfa_psat_dbm if edfa_advanced_enabled else 20.0
     noise_bw = max(edfa_ase_bw_ghz, 0.1) * 1e9 if edfa_advanced_enabled else noise_bw
-    span_gain_db = min(edfa_gain_set_db, max(0.0, span_loss_db + 3.0))
+    # 教学原模型曾把 EDFA 实际增益限制为“跨段损耗+3 dB”，
+    # 导致设置 15 dB 时在 50 km/0.2 dB/km 下只等效约 13 dB。
+    # 真实实验近似模式下更接近仪器设定：先按用户设定增益工作，再由 Psat 处理饱和压缩。
+    if realistic_experiment_mode or edfa_advanced_enabled:
+        span_gain_db = max(0.0, edfa_gain_set_db)
+    else:
+        span_gain_db = min(edfa_gain_set_db, max(0.0, span_loss_db + 3.0))
     p_signal_after_span_dbm = tx_power_dbm
     p_ase_total_w = 0.0
     gain_saturation_penalty_db = 0.0
@@ -305,7 +317,7 @@ def calculate_simulation(params):
     base_p_rx_elec_noise_w = p_rx_elec_noise_w
 
     # 【新增】接收机偏置电压与噪声模块：默认关闭，关闭时保持原有模型输出不变。
-    receiver_noise_enabled = bool(params.get('receiver_noise_enabled', False))
+    receiver_noise_enabled = bool(params.get('receiver_noise_enabled', realistic_experiment_mode))
     rx_bias_voltage = float(params.get('rx_bias_voltage', 5.0))
     rx_bandwidth_ghz = float(params.get('rx_bandwidth_ghz', 12.5))
     rx_responsivity = float(params.get('rx_responsivity', 0.85))
@@ -376,8 +388,14 @@ def calculate_simulation(params):
 
     # 色散功率代价：按调制格式差异给出更真实的趋势。
     total_disp = distance_km * disp_psnmkm
-    disp_tolerance = {'OOK': 1200, 'FSK': 1000, 'DPSK': 1800, 'PAM4': 700,
-                      'QPSK': 2200, '8-PSK': 1400, '16-QAM': 900}.get(modulation, 1000)
+    if realistic_experiment_mode:
+        # 25 Gb/s 教学近似下，1550 nm、50 km OOK 无色散补偿时眼图已可能出现闭合，
+        # 因此将 OOK/PAM4 等强度调制格式的色散容限调低。
+        disp_tolerance = {'OOK': 750, 'FSK': 850, 'DPSK': 1500, 'PAM4': 520,
+                          'QPSK': 2000, '8-PSK': 1200, '16-QAM': 750}.get(modulation, 900)
+    else:
+        disp_tolerance = {'OOK': 1200, 'FSK': 1000, 'DPSK': 1800, 'PAM4': 700,
+                          'QPSK': 2200, '8-PSK': 1400, '16-QAM': 900}.get(modulation, 1000)
     dispersion_penalty_db = 0.0
     if abs(total_disp) > disp_tolerance:
         dispersion_penalty_db = min(12.0, 3.0 * ((abs(total_disp) / disp_tolerance) - 1.0) ** 2)
@@ -454,6 +472,15 @@ def calculate_simulation(params):
     # 其它工程惩罚项：连接器/滤波器/DSP非理想项，避免理想公式过于乐观。
     implementation_penalty_db = {'OOK': 2.0, 'FSK': 3.0, 'DPSK': 2.5, 'PAM4': 4.5,
                                  'QPSK': 3.0, '8-PSK': 4.0, '16-QAM': 5.0}.get(modulation, 3.0)
+
+    # 真实仪器/OptiSystem 近似附加代价：
+    # 用于补偿简化公式中过于理想的同步、均衡、发射消光比、接收机判决、有限采样统计等因素。
+    # 该项不改变趋势，只把 Q/BER 从“理想数学值”拉回教学实验常见范围。
+    realistic_lab_penalty_db = 0.0
+    if realistic_experiment_mode:
+        realistic_lab_penalty_db = {'OOK': 13.0, 'FSK': 12.0, 'DPSK': 10.0, 'PAM4': 15.0,
+                                    'QPSK': 8.0, '8-PSK': 10.0, '16-QAM': 13.0}.get(modulation, 11.0)
+
     link_advanced_penalty_db = (fiber_pmd_penalty_db + fiber_slope_penalty_db + fiber_nli_penalty_db +
                                 edfa_flatness_penalty_db + wdm_xtalk_penalty_db + wdm_spacing_penalty_db)
     decision_filter_penalty_db = 0.0
@@ -470,9 +497,9 @@ def calculate_simulation(params):
         sampling_jitter_penalty_db = min(10.0, (abs(sampling_offset_ui) / 0.25) ** 2 * 5.0 + max(clock_jitter_ps - 2.0, 0.0) / 10.0 * 3.0)
 
     analysis_penalty_db = decision_filter_penalty_db + decision_threshold_penalty_db + sampling_jitter_penalty_db
-    base_effective_snr_db = base_snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db
+    base_effective_snr_db = base_snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db - realistic_lab_penalty_db
     base_effective_snr_linear = max(10 ** (base_effective_snr_db / 10.0), 1e-12)
-    effective_snr_db = snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db - analysis_penalty_db - tx_total_penalty_db - rx_bias_penalty_db - rx_noise_penalty_db
+    effective_snr_db = snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db - realistic_lab_penalty_db - analysis_penalty_db - tx_total_penalty_db - rx_bias_penalty_db - rx_noise_penalty_db
     effective_snr_linear = max(10 ** (effective_snr_db / 10.0), 1e-12)
 
     def qfunc(x):
@@ -507,6 +534,10 @@ def calculate_simulation(params):
 
     base_q_factor, base_ber = ber_q_from_snr(base_effective_snr_linear, modulation)
     q_factor, ber = ber_q_from_snr(effective_snr_linear, modulation)
+    if realistic_experiment_mode:
+        # 真实实验/课堂误码仪通常难以直接证明 1e-18 级 BER；
+        # 对极低误码率显示测量下限，避免学生误认为已真实测得 10^-18。
+        ber = max(ber, 1e-12)
     osnr_db = 10 * np.log10(max(p_rx_w / (p_ase_total_w + p_nli_w + 1e-24), 1e-12))
     osnr_db_01nm = osnr_db + 10 * np.log10(noise_bw / ref_bw)
 
@@ -515,6 +546,8 @@ def calculate_simulation(params):
         "osnr": osnr_db_01nm,
         "q_factor": max(0.0, q_factor),
         "ber": ber,
+        "realistic_experiment_mode": realistic_experiment_mode,
+        "realistic_lab_penalty_db": realistic_lab_penalty_db,
         "dispersion_total": total_disp,
         "nli_power_dbm": 10*np.log10(p_nli_w*1e3) if p_nli_w > 0 else -100,
         "ase_power_dbm": 10*np.log10(p_ase_total_w*1e3) if p_ase_total_w > 0 else -100,
@@ -1128,7 +1161,7 @@ with st.sidebar:
     
     st.markdown("### 1. 发射机 (Transmitter)")
     mod_options = ["OOK", "FSK", "DPSK", "PAM4", "QPSK", "8-PSK", "16-QAM"]
-    mod_format = st.selectbox("调制格式 (Tab 1)", mod_options, index=3)
+    mod_format = st.selectbox("调制格式 (Tab 1)", mod_options, index=0)
     
     def update_power():
         st.session_state.opt_power = st.session_state.tx_power_slider
@@ -1137,8 +1170,8 @@ with st.sidebar:
 
     # 【新增】发射机高级参数：类似 OptiSystem 的 CW Laser / MZM / Directly Modulated Laser 非理想项。
     with st.expander("🚀 发射机非理想参数（OptiSystem对齐）", expanded=False):
-        tx_impair_enabled = st.checkbox("启用发射机非理想影响", value=False, key="tx_impair_enabled")
-        tx_ext_ratio_db = st.slider("消光比 ER (dB)", 3.0, 20.0, 12.0, 0.5, key="tx_ext_ratio_db",
+        tx_impair_enabled = st.checkbox("启用发射机非理想影响", value=True, key="tx_impair_enabled")
+        tx_ext_ratio_db = st.slider("消光比 ER (dB)", 3.0, 20.0, 10.0, 0.5, key="tx_ext_ratio_db",
                                     help="ER 越低，0 码泄漏越明显，眼图垂直开口变小。")
         mzm_vpi = st.slider("MZM 半波电压 Vπ (V)", 1.0, 8.0, 4.0, 0.1, key="mzm_vpi")
         mzm_bias_v = st.slider("MZM 偏置电压 Vbias (V)", 0.0, 8.0, 2.0, 0.1, key="mzm_bias_v",
@@ -1149,18 +1182,18 @@ with st.sidebar:
                                         help="线宽主要影响 QPSK/16-QAM 等相干调制星座图相位噪声。")
         tx_rin_db_hz = st.slider("RIN 相对强度噪声 (dB/Hz)", -165.0, -125.0, -150.0, 1.0, key="tx_rin_db_hz",
                                  help="数值越接近 -125 dB/Hz，强度噪声越严重。")
-        tx_chirp_alpha = st.slider("发射端啁啾系数 α", -5.0, 5.0, 0.0, 0.1, key="tx_chirp_alpha",
+        tx_chirp_alpha = st.slider("发射端啁啾系数 α", -5.0, 5.0, 0.8, 0.1, key="tx_chirp_alpha",
                                    help="直接调制 LD 的啁啾会和光纤色散共同造成脉冲展宽。")
         st.caption("开启后：消光比、MZM 偏置/驱动、RIN、线宽和啁啾会转化为发射端等效代价，直接影响 Q 因子、BER、星座图/眼图开口。")
     
     st.markdown("### 2. 光纤链路 (Fiber Link)")
-    distance = st.slider("传输距离 (km)", 10, 200, 80, 5)
+    distance = st.slider("传输距离 (km)", 10, 200, 50, 5)
     attenuation = st.slider(f"衰减系数 (dB/km) @{wavelength[:4]}", 0.15, 0.50, default_att, 0.01)
     dispersion = st.slider("色散系数 (ps/nm/km)", 0, 20, default_disp, 1)
 
     # 【新增】光纤高级参数：对应 OptiSystem Optical Fiber 中的 PMD、非线性、熔接/连接器等非理想项。
     with st.expander("🧵 光纤链路高级参数（PMD/非线性/接头熔接）", expanded=False):
-        fiber_advanced_enabled = st.checkbox("启用光纤高级非理想影响", value=False, key="fiber_advanced_enabled")
+        fiber_advanced_enabled = st.checkbox("启用光纤高级非理想影响", value=True, key="fiber_advanced_enabled")
         fiber_pmd_ps_sqrtkm = st.slider("PMD 系数 (ps/√km)", 0.00, 1.00, 0.05, 0.01, key="fiber_pmd_ps_sqrtkm",
                                         help="PMD 越大，不同偏振分量到达时间差越明显，眼宽和 Q 因子下降。")
         fiber_gamma_wkm = st.slider("非线性系数 γ (1/W/km)", 0.1, 3.0, 1.3, 0.1, key="fiber_gamma_wkm",
@@ -1168,9 +1201,9 @@ with st.sidebar:
         fiber_aeff_um2 = st.slider("有效面积 Aeff (μm²)", 20.0, 120.0, 80.0, 1.0, key="fiber_aeff_um2",
                                    help="有效面积越小，光强越高，非线性噪声更明显。")
         fiber_disp_slope = st.slider("色散斜率 S (ps/nm²/km)", 0.00, 0.20, 0.08, 0.01, key="fiber_disp_slope")
-        link_connector_count = st.number_input("链路连接器数量", min_value=0, max_value=40, value=0, step=1, key="link_connector_count")
+        link_connector_count = st.number_input("链路连接器数量", min_value=0, max_value=40, value=2, step=1, key="link_connector_count")
         link_connector_loss_db = st.slider("单个连接器损耗 (dB)", 0.00, 1.00, 0.25, 0.01, key="link_connector_loss_db")
-        splice_count = st.number_input("熔接点数量", min_value=0, max_value=80, value=0, step=1, key="splice_count")
+        splice_count = st.number_input("熔接点数量", min_value=0, max_value=80, value=4, step=1, key="splice_count")
         splice_loss_db = st.slider("单个熔接损耗 (dB)", 0.00, 0.30, 0.05, 0.01, key="splice_loss_db")
         span_length_setting_km = st.slider("每跨段长度 (km)", 20.0, 120.0, 80.0, 5.0, key="span_length_setting_km")
         link_margin_db = st.slider("工程链路余量 Margin (dB)", 0.0, 10.0, 3.0, 0.5, key="link_margin_db")
@@ -1195,7 +1228,7 @@ with st.sidebar:
 
     # 【新增】EDFA 高级参数：对应 OptiSystem EDFA 中的 NF、Psat、ASE 带宽和增益平坦度。
     with st.expander("🔋 EDFA 高级参数（NF/Psat/ASE）", expanded=False):
-        edfa_advanced_enabled = st.checkbox("启用 EDFA 高级非理想影响", value=False, key="edfa_advanced_enabled")
+        edfa_advanced_enabled = st.checkbox("启用 EDFA 高级非理想影响", value=True, key="edfa_advanced_enabled")
         edfa_nf_db = st.slider("噪声系数 NF (dB)", 3.0, 9.0, 5.5, 0.1, key="edfa_nf_db",
                                help="NF 越高，ASE 噪声越大，OSNR 和 BER 越差。")
         edfa_psat_dbm = st.slider("饱和输出功率 Psat (dBm)", 5.0, 25.0, 20.0, 0.5, key="edfa_psat_dbm",
@@ -1206,7 +1239,7 @@ with st.sidebar:
 
     # 【新增】接收机滤波/判决/眼图分析参数：对应 OptiSystem Low Pass Filter + BER Analyzer + Eye Diagram Analyzer。
     with st.expander("👁️ 接收端滤波、判决与眼图分析", expanded=False):
-        decision_eye_enabled = st.checkbox("启用滤波/判决/眼图影响", value=False, key="decision_eye_enabled")
+        decision_eye_enabled = st.checkbox("启用滤波/判决/眼图影响", value=True, key="decision_eye_enabled")
         rx_filter_bw_ghz = st.slider("低通滤波器带宽 (GHz)", 2.0, 60.0, 18.0, 0.5, key="rx_filter_bw_ghz")
         rx_filter_type = st.selectbox("滤波器类型", ["Bessel", "Gaussian", "Butterworth"], index=0, key="rx_filter_type")
         decision_threshold = st.slider("判决门限（归一化）", 0.10, 0.90, 0.50, 0.01, key="decision_threshold",
@@ -1217,11 +1250,11 @@ with st.sidebar:
 
     # 【新增】接收机偏置电压与噪声模块：默认关闭，避免影响原有实验结果；开启后影响链路 BER/Q/OSNR。
     with st.expander("🔬 接收机偏置与噪声（高级）", expanded=False):
-        receiver_noise_enabled = st.checkbox("启用接收机偏置/噪声影响", value=False, key="receiver_noise_enabled")
+        receiver_noise_enabled = st.checkbox("启用接收机偏置/噪声影响", value=True, key="receiver_noise_enabled")
         rx_bias_voltage = st.slider("PIN/APD 等效偏置电压 (V)", 0.0, 15.0, 5.0, 0.1, key="rx_bias_voltage")
         rx_responsivity = st.slider("探测器响应度 R (A/W)", 0.2, 1.2, 0.85, 0.05, key="rx_responsivity")
-        rx_bandwidth_ghz = st.slider("接收机等效带宽 (GHz)", 1.0, 50.0, 12.5, 0.5, key="rx_bandwidth_ghz")
-        rx_dark_current_na = st.number_input("暗电流 Id (nA)", min_value=0.0, max_value=1000.0, value=2.0, step=0.5, key="rx_dark_current_na")
+        rx_bandwidth_ghz = st.slider("接收机等效带宽 (GHz)", 1.0, 50.0, 18.0, 0.5, key="rx_bandwidth_ghz")
+        rx_dark_current_na = st.number_input("暗电流 Id (nA)", min_value=0.0, max_value=1000.0, value=5.0, step=0.5, key="rx_dark_current_na")
         rx_load_ohm = st.select_slider("负载电阻 RL (Ω)", options=[25.0, 50.0, 75.0, 100.0, 200.0, 500.0], value=50.0, key="rx_load_ohm")
         rx_noise_scale = st.slider("噪声强度系数", 0.0, 5.0, 1.0, 0.1, key="rx_noise_scale")
         st.caption("开启后：低偏置会降低响应度，高偏置会增加暗电流；带宽越大，热噪声和散粒噪声越明显。")
@@ -1552,8 +1585,13 @@ def render_tab1_link_sim(params, metrics, client, active_model_id):
                     pass
                 st.download_button("📥 下载实验对比表 CSV", df_cmp.to_csv(index=False).encode('utf-8-sig'), "optisystem_compare.csv", "text/csv")
 
-        st.markdown("### 🖥️ 相干接收机 DSP 概念可视化")
-        st.caption("用于展示色散补偿、载波相位恢复等 DSP 环节的趋势；该星座图为概念演示，不替代完整相干接收机 DSP 算法。")
+                st.markdown("### 🖥️ 接收端均衡与判决过程可视化")
+        st.caption(
+            "该图用于展示信号经过光纤链路后，由色散、噪声、非线性和器件非理想造成的退化，"
+            "以及接收端均衡、补偿和判决恢复的过程。对于 OOK/PAM4 等强度调制系统，可理解为"
+            "接收端滤波、均衡和门限判决过程；对于 QPSK/QAM 等相干调制系统，可扩展理解为包含"
+            "色散补偿、相位恢复和 MIMO 均衡的 DSP 过程。本图主要用于教学趋势分析，不替代完整商用相干接收机算法。"
+        )
         
         curr_q = metrics['q_factor']
         curr_disp = metrics['dispersion_total']
@@ -1561,34 +1599,72 @@ def render_tab1_link_sim(params, metrics, client, active_model_id):
         s1, s2, s3 = run_coherent_dsp_demo(params['modulation'], curr_q, curr_disp, pn_std)
         
         col_dsp1, col_dsp2, col_dsp3 = st.columns(3)
+
         def plot_dsp_step(ax, signal, title, color_code):
             sig_show = signal[:500] if len(signal) > 500 else signal
-            ax.scatter(sig_show.real, sig_show.imag, s=5, c=color_code, alpha=0.6, edgecolors='none')
+
+            ax.scatter(
+                sig_show.real,
+                sig_show.imag,
+                s=5,
+                c=color_code,
+                alpha=0.6,
+                edgecolors='none'
+            )
+
             limit = 3.0 if '16-QAM' in params['modulation'] else 2.5
-            ax.set_xlim(-limit, limit); ax.set_ylim(-limit, limit)
-            ax.set_xticks([]); ax.set_yticks([]) 
-            ax.set_title(title, color='#e0e0e0', fontsize=10, pad=10)
+            ax.set_xlim(-limit, limit)
+            ax.set_ylim(-limit, limit)
+
+            # 关键：保证三张星座图坐标比例一致、图框大小一致
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_box_aspect(1)
+
+            ax.set_xticks([])
+            ax.set_yticks([])
+
+            # 标题字号略小，避免标题过长把图挤歪
+            ax.set_title(title, color='#e0e0e0', fontsize=9, pad=8)
+
             ax.axhline(0, color='gray', linestyle=':', alpha=0.3)
             ax.axvline(0, color='gray', linestyle=':', alpha=0.3)
             ax.set_facecolor('black')
 
         with col_dsp1:
             fig1, ax1 = plt.subplots(figsize=(3, 3))
-            plot_dsp_step(ax1, s1, "1. ADC Raw Input\n(Dispersion + Phase Noise)", '#ff4b4b') 
+            plot_dsp_step(
+                ax1,
+                s1,
+                "1. Raw Received\n(Noise + Dispersion)",
+                '#ff4b4b'
+            )
+            fig1.tight_layout()
             st.pyplot(fig1)
-            st.info("📉 **Rx Raw**: 信号受色散污染，星座图模糊。")
+            st.info("📉 **Rx Raw**：原始接收信号受色散、噪声和器件非理想影响，判决点分散。")
 
         with col_dsp2:
             fig2, ax2 = plt.subplots(figsize=(3, 3))
-            plot_dsp_step(ax2, s2, "2. After CDC\n(Dispersion Removed)", '#ffa500') 
+            plot_dsp_step(
+                ax2,
+                s2,
+                "2. Equalized Signal\n(ISI Partly Reduced)",
+                '#ffa500'
+            )
+            fig2.tight_layout()
             st.pyplot(fig2)
-            st.warning("🔄 **After CDC**: 色散已均衡。因相位噪声旋转。")
+            st.warning("🔄 **After Equalization**：经过接收端均衡后，色散和码间串扰得到一定补偿，信号聚类开始收敛。")
 
         with col_dsp3:
             fig3, ax3 = plt.subplots(figsize=(3, 3))
-            plot_dsp_step(ax3, s3, "3. After CPR & MIMO\n(Final Recovered)", '#00ff00') 
+            plot_dsp_step(
+                ax3,
+                s3,
+                "3. Decision Output\n(Recovered Symbols)",
+                '#00ff00'
+            )
+            fig3.tight_layout()
             st.pyplot(fig3)
-            st.success("✅ **Final Output**: 载波相位锁定，星座图清晰。")
+            st.success("✅ **Final Decision**：经过采样判决和幅度恢复后，信号点进一步集中，可用于观察最终传输质量。")
 
         st.markdown("---")
         st.markdown("### ⏱️ 光时域脉冲展宽与带宽评估 (Optical Time Domain Visualizer)")
