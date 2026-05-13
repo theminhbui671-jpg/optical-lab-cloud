@@ -255,9 +255,17 @@ def calculate_simulation(params):
     nu = c / lam_m
     p_tx_w = 10 ** ((tx_power_dbm - 30) / 10.0)
 
+    # 默认采用单跨段教学模型：
+# 只改变传输距离时，不自动新增 EDFA，避免距离超过 80 km 后性能反而变好。
     span_length_ref = span_length_setting_km if fiber_advanced_enabled else 80.0
-    span_length_ref = max(10.0, span_length_ref)
-    num_spans = max(1, int(np.ceil(distance_km / span_length_ref)))
+
+    auto_span_enabled = bool(params.get('auto_span_enabled', False))
+
+    if auto_span_enabled:
+       num_spans = max(1, int(np.ceil(distance_km / max(span_length_ref, 10.0))))
+    else:
+       num_spans = 1
+
     span_len_km = distance_km / num_spans
     span_loss_db = span_len_km * att_db
     total_loss_db = distance_km * att_db
@@ -270,10 +278,8 @@ def calculate_simulation(params):
     # 教学原模型曾把 EDFA 实际增益限制为“跨段损耗+3 dB”，
     # 导致设置 15 dB 时在 50 km/0.2 dB/km 下只等效约 13 dB。
     # 真实实验近似模式下更接近仪器设定：先按用户设定增益工作，再由 Psat 处理饱和压缩。
-    if realistic_experiment_mode or edfa_advanced_enabled:
-        span_gain_db = max(0.0, edfa_gain_set_db)
-    else:
-        span_gain_db = min(edfa_gain_set_db, max(0.0, span_loss_db + 3.0))
+    # EDFA 增益采用用户设置值，避免距离变化时程序自动补偿链路损耗。
+    span_gain_db = max(0.0, edfa_gain_set_db)
     p_signal_after_span_dbm = tx_power_dbm
     p_ase_total_w = 0.0
     gain_saturation_penalty_db = 0.0
@@ -292,6 +298,11 @@ def calculate_simulation(params):
         p_ase_total_w += 2.0 * h * nu * nf_lin * max(gain_lin - 1.0, 0.0) * noise_bw
 
     rx_power_dbm = p_signal_after_span_dbm
+        # 高 EDFA 增益/高接收光功率下的接收机过载惩罚。
+    # 真实接收机存在线性输入范围，接收功率过高时可能产生饱和、削顶或判决失真。
+    rx_overload_penalty_db = 0.0
+    if rx_power_dbm > 8.0:
+        rx_overload_penalty_db = min(12.0, (rx_power_dbm - 8.0) * 2.5)
 
     # 光纤链路/WDM 额外无源损耗：连接器、熔接、MUX/DEMUX 与工程链路余量。
     link_connector_total_loss_db = 0.0
@@ -499,7 +510,7 @@ def calculate_simulation(params):
     analysis_penalty_db = decision_filter_penalty_db + decision_threshold_penalty_db + sampling_jitter_penalty_db
     base_effective_snr_db = base_snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db - realistic_lab_penalty_db
     base_effective_snr_linear = max(10 ** (base_effective_snr_db / 10.0), 1e-12)
-    effective_snr_db = snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db - realistic_lab_penalty_db - analysis_penalty_db - tx_total_penalty_db - rx_bias_penalty_db - rx_noise_penalty_db
+    effective_snr_db = snr_db_raw - dispersion_penalty_db - implementation_penalty_db - gain_saturation_penalty_db - link_advanced_penalty_db - realistic_lab_penalty_db - analysis_penalty_db - tx_total_penalty_db - rx_bias_penalty_db - rx_noise_penalty_db - rx_overload_penalty_db    
     effective_snr_linear = max(10 ** (effective_snr_db / 10.0), 1e-12)
 
     def qfunc(x):
@@ -555,6 +566,7 @@ def calculate_simulation(params):
         "sensitivity_margin_db": rx_power_dbm - rx_sensitivity_dbm,
         "dispersion_penalty_db": dispersion_penalty_db,
         "gain_saturation_penalty_db": gain_saturation_penalty_db,
+        "rx_overload_penalty_db": rx_overload_penalty_db,
         "base_q_factor": max(0.0, base_q_factor),
         "base_ber": base_ber,
         "base_rx_sensitivity_dbm": base_rx_sensitivity_dbm,
@@ -642,7 +654,13 @@ def run_coherent_dsp_demo(modulation, q_factor, dispersion, phase_noise_std=0.05
 
     tx_sig = np.random.choice(base_points, n_symbols)
     
-    noise_scale = 1.0 / (q_factor + 1e-9) * 0.7
+    if modulation == "16-QAM":
+    # 16-QAM 星座点较密集，显示时保留扩散，但避免完全随机化。
+       noise_scale = min(0.55, 0.55 / (q_factor + 1e-9))
+    elif modulation == "PAM4":
+       noise_scale = min(0.70, 0.60 / (q_factor + 1e-9))
+    else:
+       noise_scale = 1.0 / (q_factor + 1e-9) * 0.7
     ase_noise = np.random.normal(0, noise_scale, n_symbols) + 1j * np.random.normal(0, noise_scale, n_symbols)
     
     pn_sequence = np.cumsum(np.random.normal(0, phase_noise_std, n_symbols))
@@ -652,6 +670,23 @@ def run_coherent_dsp_demo(modulation, q_factor, dispersion, phase_noise_std=0.05
     cd_effect = np.exp(1j * np.random.randn(n_symbols) * cd_severity * 5)
     
     sig_stage_3 = tx_sig + ase_noise
+    if modulation == "16-QAM":
+    # 让最终判决图更像 16-QAM 星座恢复结果：
+    # 保留一定扩散，但避免点云完全随机，便于观察 16 个判决聚类。
+      levels = np.array([-3, -1, 1, 3], dtype=float)
+      constellation = np.array([x + 1j * y for x in levels for y in levels])
+      norm = np.sqrt(np.mean(np.abs(constellation) ** 2)) / np.sqrt(2)
+
+      real_scaled = sig_stage_3.real * norm
+      imag_scaled = sig_stage_3.imag * norm
+
+      decision_real = levels[np.argmin(np.abs(real_scaled[:, None] - levels), axis=1)] / norm
+      decision_imag = levels[np.argmin(np.abs(imag_scaled[:, None] - levels), axis=1)] / norm
+
+      sig_stage_3 = decision_real + 1j * decision_imag + (
+        np.random.normal(0, min(0.15, noise_scale * 0.35), n_symbols)
+        + 1j * np.random.normal(0, min(0.15, noise_scale * 0.35), n_symbols)
+    )
     sig_stage_2 = sig_stage_3 * phase_rotation
     sig_stage_1 = sig_stage_2 * cd_effect
     
@@ -682,9 +717,25 @@ def generate_eye_diagram_data(metrics, params, n_bits=160, samples_per_bit=32):
     kernel = kernel / max(kernel.sum(), 1e-9)
     waveform = np.convolve(waveform, kernel, mode="same")
 
-    # 根据有效 SNR、RIN、接收机噪声和串扰注入幅度噪声。
+    # 根据有效 SNR、RIN、接收机噪声、串扰以及 BER 状态注入幅度噪声。
+    # 当 BER 很高时，说明系统已经进入严重失效区，此时眼图应表现为更加混乱，
+    # 而不是在长距离后几乎保持不变。
     q = max(metrics.get("q_factor", 1.0), 0.15)
-    noise_std = np.clip(0.18 / q + metrics.get("tx_rin_penalty_db", 0.0) * 0.015 + metrics.get("wdm_xtalk_penalty_db", 0.0) * 0.012, 0.01, 0.42)
+    ber_val = metrics.get("ber", 1e-12)
+
+    ber_penalty = 0.0
+    if ber_val > 1e-3:
+        ber_penalty = min(0.35, np.log10(ber_val / 1e-3 + 1.0) * 0.18)
+
+    noise_std = np.clip(
+        0.18 / q
+        + metrics.get("tx_rin_penalty_db", 0.0) * 0.015
+        + metrics.get("wdm_xtalk_penalty_db", 0.0) * 0.012
+        + ber_penalty,
+        0.01,
+        0.75
+    )
+
     waveform = waveform + rng.normal(0, noise_std, len(waveform))
 
     # 采样偏移和时钟抖动压缩眼宽。
@@ -699,8 +750,10 @@ def generate_eye_diagram_data(metrics, params, n_bits=160, samples_per_bit=32):
         end = start + 2 * sps
         if start >= 0 and end <= len(waveform):
             segments.append(waveform[start:end])
+
     if not segments:
-        segments = [waveform[:2*sps]]
+        segments = [waveform[:2 * sps]]
+
     arr = np.array(segments)
 
     center = arr[:, sps]
@@ -713,9 +766,131 @@ def generate_eye_diagram_data(metrics, params, n_bits=160, samples_per_bit=32):
             eye_height = max(0.0, np.mean(ones) - np.mean(zeros) - 3 * (np.std(ones) + np.std(zeros)))
         else:
             eye_height = max(0.0, 2.0 - 6 * np.std(center))
-    eye_width = max(0.0, 1.0 - abs(ui_shift) * 1.7 - jitter_ui * 1.8 - filter_pen / 14.0 - disp_pen / 18.0)
-    noise_margin = max(0.0, eye_height / 2.0 - abs(metrics.get("decision_threshold", 0.5) - 0.5))
-    return seg_t, arr, {"eye_height": eye_height, "eye_width": eye_width, "noise_margin": noise_margin, "jitter_ui": jitter_ui, "noise_std": noise_std}
+
+    # 眼宽加入 BER/Q 因子退化影响，避免长距离失效区眼宽过早固定不变。
+    ber_eye_penalty = 0.0
+    if ber_val > 1e-6:
+        ber_eye_penalty = min(0.45, np.log10(ber_val / 1e-6 + 1.0) * 0.08)
+
+    q_eye_penalty = 0.0
+    if q < 3.0:
+        q_eye_penalty = min(0.35, (3.0 - q) / 3.0 * 0.35)
+
+    eye_width_raw = (
+        1.0
+        - abs(ui_shift) * 1.7
+        - jitter_ui * 1.8
+        - filter_pen / 14.0
+        - disp_pen / 18.0
+        - ber_eye_penalty
+        - q_eye_penalty
+    )
+    eye_width = max(0.0, eye_width_raw)
+
+    noise_margin = max(
+        0.0,
+        eye_height / 2.0 - abs(metrics.get("decision_threshold", 0.5) - 0.5)
+    )
+
+        # 分级判断眼图状态：
+    # degraded：链路已经出现明显退化，但眼图尚未完全闭合。
+    # saturated：链路进入严重失效区，眼高/眼宽接近下限或 BER 很高。
+    eye_degraded = bool(
+        ber_val > 1e-4
+        or q < 4.0
+        or eye_height < 0.6
+        or eye_width < 0.5
+    )
+
+    eye_saturated = bool(
+        eye_height <= 0.05
+        or eye_width <= 0.05
+        or ber_val > 1e-2
+        or q < 2.0
+    )
+
+    return seg_t, arr, {
+        "eye_height": eye_height,
+        "eye_width": eye_width,
+        "noise_margin": noise_margin,
+        "jitter_ui": jitter_ui,
+        "noise_std": noise_std,
+        "eye_degraded": eye_degraded,
+        "eye_saturated": eye_saturated
+    }
+
+def get_eye_degradation_reason(metrics, params):
+    """
+    根据各类等效代价自动判断眼图退化主要原因。
+    只用于提示文字，不改变原有仿真计算、图形生成和参数功能。
+    返回：原因类型、顶部提示、图下说明。
+    """
+    candidates = [
+        (
+            metrics.get("rx_overload_penalty_db", 0),
+            "接收机过载",
+            "当前接收光功率偏高，可能出现接收机过载或非线性失真，继续增大发射功率或EDFA增益可能进一步降低Q因子并增大误码率。",
+            "当前高接收功率下眼图开口减小，说明接收端可能出现过载或非线性失真，Q因子下降，BER升高。"
+        ),
+        (
+            max(
+                0.0,
+                10.0 - metrics.get("sensitivity_margin_db", 0.0),
+                -float(params.get("tx_power", 0.0)) * 0.8 if float(params.get("tx_power", 0.0)) < 0 else 0.0,
+                3.0 - metrics.get("rx_power", 0.0) if metrics.get("rx_power", 0.0) < 3.0 else 0.0
+               ),
+                "接收功率不足",
+                "当前发射功率或接收光功率偏低，接收端信号幅度裕量不足，噪声相对影响增强。继续降低发射功率、减小EDFA增益或增加链路损耗会进一步降低Q因子并增大误码率。",
+                "当前接收光功率偏低，信号幅度裕量不足，接收机噪声相对占比增大，导致眼图开口减小、Q因子下降、BER升高。"
+        ),
+        (
+            metrics.get("tx_total_penalty_db", 0),
+            "发射机非理想",
+            "当前发射机非理想因素较明显，消光比、MZM偏置、驱动电压、激光器线宽、RIN或啁啾可能导致眼图开口减小和BER升高。",
+            "发射机非理想会降低调制质量，使上下电平分离变差或星座点扩散，从而压缩判决裕量。"
+        ),
+        (
+            metrics.get("dispersion_penalty_db", 0),
+            "色散积累",
+            "当前链路色散代价较明显，继续增加传输距离或色散系数会加重脉冲展宽和码间串扰，进一步降低Q因子并增大误码率。",
+            "色散会导致脉冲展宽和码间串扰，使眼图水平开口变窄，采样裕量下降。"
+        ),
+        (
+            metrics.get("link_advanced_penalty_db", 0),
+            "链路高级代价",
+            "当前光纤/EDFA/WDM链路代价较明显，可能与PMD、非线性效应、连接器损耗、熔接损耗、EDFA增益平坦度或WDM串扰有关。",
+            "链路非理想因素会降低接收功率或引入额外串扰，使眼图开口减小，BER升高。"
+        ),
+        (
+            metrics.get("analysis_penalty_db", 0),
+            "滤波/判决/采样问题",
+            "当前接收滤波、判决门限或采样位置设置不理想，可能导致眼图开口减小和BER升高。",
+            "判决门限偏移、采样位置偏离或时钟抖动会直接压缩眼图有效开口，使判决裕量下降。"
+        ),
+        (
+            metrics.get("rx_total_penalty_db", 0)*0.6,
+            "接收机噪声",
+            "当前接收机非理想因素较明显，接收机带宽、响应度、暗电流、热噪声或偏置电压可能导致Q因子下降和BER升高。",
+            "接收机噪声会增加电平抖动，使眼图轨迹变粗，噪声裕量下降。"
+        ),
+        (
+            metrics.get("gain_saturation_penalty_db", 0),
+            "EDFA饱和",
+            "当前EDFA可能接近饱和工作区，继续增大EDFA增益不一定改善系统性能，反而可能引入额外噪声或失真。",
+            "EDFA饱和或增益设置不当会使链路补偿效果变差，导致Q因子下降和BER升高。"
+        ),
+    ]
+
+    main_value, main_reason, top_msg, caption_msg = max(candidates, key=lambda x: x[0])
+
+    if main_value < 0.2:
+        return (
+            "综合退化",
+            "当前链路已进入退化区，但没有单一参数占主导。建议综合检查发射功率、EDFA增益、传输距离、接收机带宽、判决门限和调制格式。",
+            "当前眼图开口减小，说明系统综合判决裕量下降，BER有升高趋势。"
+        )
+
+    return main_reason, top_msg, caption_msg
 
 def encode_cmi(bits):
     encoded_bits = []
@@ -1438,6 +1613,24 @@ def render_tab1_link_sim(params, metrics, client, active_model_id):
         if metrics.get("decision_eye_enabled", False):
             st.markdown("#### 👁️ Eye Diagram / 眼图分析（BER Analyzer 对齐显示）")
             eye_t, eye_segments, eye_info = generate_eye_diagram_data(metrics, params)
+
+            deg_reason, deg_top_msg, deg_caption_msg = get_eye_degradation_reason(metrics, params)
+
+            if eye_info.get("eye_saturated", False):
+                st.error(
+                    f"当前链路已进入严重失效区，主要原因可能是：{deg_reason}。"
+                    f"{deg_top_msg}"
+                )
+            elif eye_info.get("eye_degraded", False):
+                st.warning(
+                    f"当前链路已进入明显退化区，主要原因可能是：{deg_reason}。"
+                    f"{deg_top_msg}"
+                )
+            else:
+                st.success(
+                    "当前链路眼图开口良好，判决裕量较充足，系统误码率较低。"
+                )
+
             ecols = st.columns(4)
             ecols[0].metric("眼高 Eye Height", f"{eye_info['eye_height']:.2f}")
             ecols[1].metric("眼宽 Eye Width", f"{eye_info['eye_width']:.2f} UI")
@@ -1447,14 +1640,77 @@ def render_tab1_link_sim(params, metrics, client, active_model_id):
             for seg in eye_segments[:70]:
                 ax_eye.plot(eye_t, seg, alpha=0.18, linewidth=0.8)
             ax_eye.axvline(0, linestyle="--", linewidth=1.0, alpha=0.7, label="采样中心")
-            ax_eye.axhline(2*metrics.get('decision_threshold', 0.5)-1, linestyle=":", linewidth=1.2, alpha=0.8, label="判决门限")
+            if params.get("modulation", "OOK") == "PAM4":
+              for th in [-2/3, 0, 2/3]:
+                  ax_eye.axhline(
+                     th,
+                     linestyle=":",
+                     linewidth=1.2,
+                     alpha=0.8,
+                     label="PAM4判决门限" if th == -2/3 else None
+        )
+            else:
+              ax_eye.axhline(
+                  2 * metrics.get('decision_threshold', 0.5) - 1,
+                  linestyle=":",
+                  linewidth=1.2,
+                  alpha=0.8,
+                  label="判决门限"
+        )
             ax_eye.set_xlabel("Time (UI)")
             ax_eye.set_ylabel("Normalized Amplitude")
-            ax_eye.set_title("教学眼图：参数越差，眼高/眼宽越小，BER 越高")
+            if eye_info.get("eye_saturated", False):
+                eye_title = f"教学眼图：严重失效区，主要退化原因：{deg_reason}"
+            elif eye_info.get("eye_degraded", False):
+                eye_title = f"教学眼图：退化区，主要退化原因：{deg_reason}"
+            else:
+                eye_title = "教学眼图：眼图开口良好，判决裕量充足，系统误码率较低"
+
+            ax_eye.set_title(eye_title)
             ax_eye.grid(True, alpha=0.25)
             ax_eye.legend(loc="best")
             st.pyplot(fig_eye)
-            st.caption("眼图与 OptiSystem 的 Eye Diagram Analyzer 趋势对齐：噪声主要压缩眼高，色散/PMD/滤波/抖动主要压缩眼宽。")
+            modulation_name = params.get("modulation", "OOK")
+
+            if modulation_name == "DPSK":
+                if eye_info.get("eye_degraded", False) or eye_info.get("eye_saturated", False):
+                    st.caption(
+                        f"DPSK 眼图为教学辅助观察：{deg_caption_msg} "
+                        "同时应结合差分相位判决结果综合判断链路质量。"
+                    )
+                else:
+                    st.caption(
+                        "DPSK 眼图为教学辅助观察：当前眼图开口较大、噪声裕量较高，说明链路判决条件较好。"
+                        "但 DPSK 的主要优势体现在差分相位判决，普通强度眼图只能作为辅助参考。"
+                    )
+            elif modulation_name == "OOK":
+                if eye_info.get("eye_degraded", False) or eye_info.get("eye_saturated", False):
+                    st.caption(
+                        f"OOK 眼图为主要观察依据：{deg_caption_msg}"
+                    )
+                else:
+                    st.caption(
+                        "OOK 眼图为主要观察依据：上下电平分离越明显、眼高/眼宽越大，说明判决裕量越充足，BER 越低。"
+                    )
+            elif modulation_name == "PAM4":
+                if eye_info.get("eye_degraded", False) or eye_info.get("eye_saturated", False):
+                    st.caption(
+                        f"PAM4 为四电平强度调制：{deg_caption_msg} "
+                        "三条判决门限之间的眼孔越小，说明电平间隔越容易受噪声、色散和接收机非线性影响。"
+                    )
+                else:
+                    st.caption(
+                        "PAM4 为四电平强度调制，主要观察多电平眼图。三条判决门限之间的眼孔越小，"
+                        "说明电平间隔越容易受噪声、色散和接收机非线性影响，BER 越高。"
+                    )
+            elif eye_info.get("eye_saturated", False) or eye_info.get("eye_degraded", False):
+                st.caption(
+                    f"眼图为教学近似显示：{deg_caption_msg}"
+                )
+            else:
+                st.caption(
+                    "眼图为教学近似显示：当前眼图开口良好，说明接收端具有较充足的判决裕量。"
+                )
 
         if metrics.get("tx_impair_enabled", False):
             tx1, tx2, tx3, tx4 = st.columns(4)
